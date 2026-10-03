@@ -305,6 +305,18 @@ static void rgba8_rgb8(const uint8_t *src, uint8_t *dst, uint32_t n,
 {
     uint16_t r = c->trns_r, g = c->trns_g, b = c->trns_b;
     uint32_t i;
+    if (c->reverse) {
+        src += (size_t)n * 3; dst += (size_t)n * 4;
+        while (n--) {
+            uint8_t sr, sg, sb;
+            src -= 3; dst -= 4;
+            sr = src[0]; sg = src[1]; sb = src[2];
+            dst[0] = sr; dst[1] = sg; dst[2] = sb;
+            dst[3] = (c->has_trns && sr == (r & 0xFF) &&
+                      sg == (g & 0xFF) && sb == (b & 0xFF)) ? 0 : 255;
+        }
+        return;
+    }
     for (i = 0; i < n; i++) {
         dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
         dst[3] = (c->has_trns && src[0] == (r & 0xFF) &&
@@ -785,6 +797,7 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
     uint64_t bitpp, raw_size, rb64, out_size;
     size_t rb;
     uint8_t *raw, *zeros, *native;
+    int expand_in_place;
 
     if (!data || !out)
         return PTPNG_E_BAD_ARG;
@@ -1304,7 +1317,10 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
     }
 
     if (prof) P1 = pt_tsc();
-    raw = (uint8_t *)malloc((size_t)raw_size);
+    expand_in_place = !interlace && depth == 8 && ct == 2 &&
+                      opts->output_format == PTPNG_OUT_RGBA8;
+    raw = (uint8_t *)malloc((size_t)(expand_in_place && out_size > raw_size
+                                  ? out_size : raw_size));
     zeros = (uint8_t *)calloc(rb + 16, 1);
     if (!raw || !zeros) {
         free(raw); free(zeros);
@@ -1387,7 +1403,13 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
             *out_len = (size_t)out_size;
         linfo.rowbytes = rb;
     } else {
-        uint8_t *conv = (uint8_t *)malloc((size_t)out_size);
+        /* Backward RGB8 expansion reuses the larger raw allocation.
+         * Alpha removal writes fewer bytes than it reads. RGBA8-to-RGB8
+         * converters support dst <= src, so compact into the native
+         * allocation without touching unread pixels or later rows. */
+        uint8_t *conv = expand_in_place || (depth == 8 && ct == 6 &&
+                        opts->output_format == PTPNG_OUT_RGB8)
+                      ? native : (uint8_t *)malloc((size_t)out_size);
         struct ptpng_cvt cvt;
         const ptpng_cvt_fn *tbl;
         size_t dst_row = (size_t)(out_size / h);
@@ -1406,6 +1428,7 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
         cvt.trns_g = linfo.trns[1];
         cvt.trns_b = linfo.trns[2];
         cvt.has_trns = linfo.has_trns;
+        cvt.reverse = (uint8_t)expand_in_place;
         if (ct == 3) {
             /* Packed entries serve RGB stores and the RGBA gather path. */
             unsigned pi;
@@ -1427,15 +1450,17 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
             cvt.fn = ptpng_cvt_table_rgba8_scalar[
                 ((unsigned)ct << 4) | DC(depth)];
         if (!cvt.fn) {
-            free(conv); free(native);
+            if (conv != native) free(conv);
+            free(native);
             ptpng_info_free(&linfo);
             return PTPNG_E_UNSUPPORTED;
         }
         for (y = 0; y < h; y++) {
-            cvt.fn(native + (size_t)y * rb, conv + (size_t)y * dst_row,
+            uint32_t row = expand_in_place ? h - 1 - y : y;
+            cvt.fn(native + (size_t)row * rb, conv + (size_t)row * dst_row,
                    w, &cvt);
         }
-        free(native);
+        if (conv != native) free(native);
         *out = conv;
         if (out_len)
             *out_len = (size_t)out_size;

@@ -306,8 +306,36 @@ static void rgba8_rgb8_neon(const uint8_t *src, uint8_t *dst, uint32_t n,
                             const struct ptpng_cvt *c)
 {
     uint8x16x4_t rgba;
-    (void)c;
     rgba.val[3] = vdupq_n_u8(255);
+    if (c->reverse) {
+        while (n >= 16) {
+            uint8x16x3_t rgb;
+            n -= 16;
+            rgb = vld3q_u8(src + (size_t)n * 3);
+            rgba.val[0] = rgb.val[0];
+            rgba.val[1] = rgb.val[1];
+            rgba.val[2] = rgb.val[2];
+            vst4q_u8(dst + (size_t)n * 4, rgba);
+        }
+        if (n >= 8) {
+            uint8x8x4_t small;
+            uint8x8x3_t rgb;
+            n -= 8;
+            rgb = vld3_u8(src + (size_t)n * 3);
+            small.val[0] = rgb.val[0]; small.val[1] = rgb.val[1];
+            small.val[2] = rgb.val[2]; small.val[3] = vdup_n_u8(255);
+            vst4_u8(dst + (size_t)n * 4, small);
+        }
+        while (n) {
+            uint8_t r, g, b;
+            --n;
+            r = src[(size_t)n * 3]; g = src[(size_t)n * 3 + 1];
+            b = src[(size_t)n * 3 + 2];
+            dst[(size_t)n * 4] = r; dst[(size_t)n * 4 + 1] = g;
+            dst[(size_t)n * 4 + 2] = b; dst[(size_t)n * 4 + 3] = 255;
+        }
+        return;
+    }
     for (; n >= 16; n -= 16, src += 48, dst += 64) {
         uint8x16x3_t rgb = vld3q_u8(src);
         rgba.val[0] = rgb.val[0];
@@ -329,6 +357,35 @@ static void rgba8_rgb8_neon(const uint8_t *src, uint8_t *dst, uint32_t n,
         dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = 255;
     }
 }
+
+/* RGBA8 -> RGB8 with bounded structured loads and exact RGB stores. */
+#if defined(__clang__) || defined(_MSC_VER)
+static void rgb8_rgba8_neon(const uint8_t *src, uint8_t *dst, uint32_t n,
+                            const struct ptpng_cvt *c)
+{
+    (void)c;
+    for (; n >= 16; n -= 16, src += 64, dst += 48) {
+        uint8x16x4_t rgba = vld4q_u8(src);
+        uint8x16x3_t rgb;
+        rgb.val[0] = rgba.val[0];
+        rgb.val[1] = rgba.val[1];
+        rgb.val[2] = rgba.val[2];
+        vst3q_u8(dst, rgb);
+    }
+    if (n >= 8) {
+        uint8x8x4_t rgba = vld4_u8(src);
+        uint8x8x3_t rgb;
+        rgb.val[0] = rgba.val[0];
+        rgb.val[1] = rgba.val[1];
+        rgb.val[2] = rgba.val[2];
+        vst3_u8(dst, rgb);
+        n -= 8; src += 32; dst += 24;
+    }
+    for (; n; --n, src += 4, dst += 3) {
+        dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
+    }
+}
+#endif
 
 /* gray8 -> RGBA8: gg holds each value twice; controls index 0,2,4,6 and
  * 8,10,12,14; index 16 (out of table) zeroes the alpha lane which is
@@ -442,6 +499,10 @@ void ptpng_neon_init(void)
     ptpng_cvt_table_rgba8_neon[(2 << 4) | 3] = rgba8_rgb8_neon;
     ptpng_cvt_table_rgba8_neon[(4 << 4) | 3] = rgba8_ga8_neon;
     ptpng_cvt_table_rgba8_neon[(6 << 4) | 4] = rgba8_rgba16_neon;
+    /* GCC's scalar converter auto-vectorizes faster on Neoverse-N2. */
+#if defined(__clang__) || defined(_MSC_VER)
+    ptpng_cvt_table_rgb8_neon[(6 << 4) | 3] = rgb8_rgba8_neon;
+#endif
 }
 
 #endif /* PTPNG_ARM_NEON */

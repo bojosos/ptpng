@@ -363,9 +363,8 @@ static void rgba8_rgb16_avx2(const uint8_t *src, uint8_t *dst, uint32_t n,
     }
 }
 
-/* rgb8 -> RGBA8: one pshufb+or per 4 pixels; the 16-byte load may read
- * up to 4 bytes past the 12 useful ones, so the vector loop stops 6
- * pixels early and a scalar tail finishes the row. */
+/* RGB8 -> RGBA8. Two overlapping, bounded loads supply eight pixels;
+ * shifting the second load puts four RGB triples in each AVX2 lane. */
 static void rgba8_rgb8_avx2(const uint8_t *src, uint8_t *dst, uint32_t n,
                             const struct ptpng_cvt *c)
 {
@@ -374,7 +373,39 @@ static void rgba8_rgb8_avx2(const uint8_t *src, uint8_t *dst, uint32_t n,
     const __m128i alpha = _mm_setr_epi8(0, 0, 0, -1, 0, 0, 0, -1,
                                         0, 0, 0, -1, 0, 0, 0, -1);
     uint32_t i = 0;
-    (void)c;
+    if (c->reverse) {
+        while (n >= 8) {
+            const uint8_t *s;
+            __m128i lo, hi;
+            __m256i v;
+            n -= 8; s = src + (size_t)n * 3;
+            lo = _mm_loadu_si128((const __m128i *)s);
+            hi = _mm_loadu_si128((const __m128i *)(s + 8));
+            v = _mm256_inserti128_si256(_mm256_castsi128_si256(lo),
+                                       _mm_srli_si128(hi, 4), 1);
+            v = _mm256_shuffle_epi8(v, _mm256_broadcastsi128_si256(ctrl));
+            _mm256_storeu_si256((__m256i *)(dst + (size_t)n * 4),
+                               _mm256_or_si256(v, _mm256_broadcastsi128_si256(alpha)));
+        }
+        while (n) {
+            uint8_t r, g, b;
+            --n;
+            r = src[(size_t)n * 3]; g = src[(size_t)n * 3 + 1];
+            b = src[(size_t)n * 3 + 2];
+            dst[(size_t)n * 4] = r; dst[(size_t)n * 4 + 1] = g;
+            dst[(size_t)n * 4 + 2] = b; dst[(size_t)n * 4 + 3] = 255;
+        }
+        return;
+    }
+    for (; n - i >= 8; i += 8) {
+        __m128i lo = _mm_loadu_si128((const __m128i *)(src + i * 3));
+        __m128i hi = _mm_loadu_si128((const __m128i *)(src + i * 3 + 8));
+        __m256i v = _mm256_inserti128_si256(_mm256_castsi128_si256(lo),
+                                           _mm_srli_si128(hi, 4), 1);
+        v = _mm256_shuffle_epi8(v, _mm256_broadcastsi128_si256(ctrl));
+        _mm256_storeu_si256((__m256i *)(dst + i * 4),
+                           _mm256_or_si256(v, _mm256_broadcastsi128_si256(alpha)));
+    }
     for (; i + 6 <= n; i += 4) {
         __m128i v = _mm_loadu_si128((const __m128i *)(src + i * 3));
         _mm_storeu_si128((__m128i *)(dst + i * 4),
@@ -385,6 +416,36 @@ static void rgba8_rgb8_avx2(const uint8_t *src, uint8_t *dst, uint32_t n,
         dst[i * 4 + 1] = src[i * 3 + 1];
         dst[i * 4 + 2] = src[i * 3 + 2];
         dst[i * 4 + 3] = 255;
+    }
+}
+
+/* RGBA8 -> RGB8. Compact each lane to twelve bytes, then join the lanes
+ * with exact sixteen- and eight-byte stores. Alpha is discarded. */
+static void rgb8_rgba8_avx2(const uint8_t *src, uint8_t *dst, uint32_t n,
+                            const struct ptpng_cvt *c)
+{
+    const __m128i ctrl = _mm_setr_epi8(0, 1, 2, 4, 5, 6, 8, 9,
+                                       10, 12, 13, 14, -1, -1, -1, -1);
+    (void)c;
+    for (; n >= 8; n -= 8, src += 32, dst += 24) {
+        __m256i v = _mm256_loadu_si256((const __m256i *)src);
+        __m128i lo, hi;
+        v = _mm256_shuffle_epi8(v, _mm256_broadcastsi128_si256(ctrl));
+        lo = _mm256_castsi256_si128(v);
+        hi = _mm256_extracti128_si256(v, 1);
+        _mm_storeu_si128((__m128i *)dst,
+                        _mm_or_si128(lo, _mm_slli_si128(hi, 12)));
+        _mm_storel_epi64((__m128i *)(dst + 16), _mm_srli_si128(hi, 4));
+    }
+    if (n >= 4) {
+        __m128i v = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)src), ctrl);
+        uint32_t tail = (uint32_t)_mm_cvtsi128_si32(_mm_srli_si128(v, 8));
+        _mm_storel_epi64((__m128i *)dst, v);
+        memcpy(dst + 8, &tail, sizeof(tail));
+        n -= 4; src += 16; dst += 12;
+    }
+    for (; n; --n, src += 4, dst += 3) {
+        dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
     }
 }
 
@@ -476,5 +537,6 @@ void ptpng_avx2_init(void)
         ptpng_cvt_table_rgba8_avx2[(2 << 4) | 4] = rgba8_rgb16_avx2;
         ptpng_cvt_table_rgba8_avx2[(6 << 4) | 4] = rgba8_rgba16_avx2;
         ptpng_cvt_table_rgba8_avx2[(3 << 4) | 3] = rgba8_p8_avx2;
+        ptpng_cvt_table_rgb8_avx2[(6 << 4) | 3] = rgb8_rgba8_avx2;
     }
 }

@@ -135,6 +135,7 @@ struct ptpng_cvt {
     uint16_t trns_mask;       /* ct0: gray sample            */
     uint16_t trns_r, trns_g, trns_b; /* ct2 samples          */
     uint8_t has_trns;         /* ct0/2: apply transparency   */
+    uint8_t reverse;          /* RGB8 -> RGBA8: expand backward in place */
     uint8_t pal_rgba[1024];   /* ct3: precombined rgba table (AVX2 gather path) */
 };
 

@@ -143,13 +143,18 @@ on the two Windows platforms.
 The encoder changed on 1 October to target level-6 file sizes. The RGB
 photo drops from 9.29 to 5.11 MiB, versus zlib-ng's 5.10 MiB. All five
 platforms produce identical PNG sizes; the nine fixtures are at most
-2.4% larger than zlib-ng level 6. The latest encoder averages 2.25–2.98x
+2.4% larger than zlib-ng level 6. The 1 October encoder averaged 2.25–2.98x
 stock zlib level 6 and 1.14–1.52x zlib-ng across the five platforms, with
 some slower cases. Same-machine comparisons show another 14% gain on
 Linux x64 and 7% on Linux ARM64, with byte-identical output.
 See [encoder sizes](PERFORMANCE.md#1-october-encoder-compression) and
 [speed measurements](PERFORMANCE.md#encoder-speed-at-unchanged-sizes).
 Earlier dashboard points use the previous speed-first compressor.
+
+The [3 October follow-up](PERFORMANCE.md#3-october-nightly-follow-up) improves
+RGB-photo encoding by 7.5–15.8% and Gray16-photo encoding by 6.7–12.9% in
+same-machine comparisons across all five platforms, with unchanged PNG
+bytes. Some workloads retain small losses; see the full measurements.
 
 See [per-image times and file sizes](PERFORMANCE.md#30-september-benchmark-snapshot)
 or the [live dashboard](https://bojosos.github.io/ptpng/bench/) for all

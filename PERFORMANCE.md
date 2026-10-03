@@ -4,6 +4,90 @@ ptpng targets fast single-threaded PNG decoding on x86 AVX2 and ARM64
 NEON. A kernel benchmark measures one operation; it does not establish
 the speed of a complete PNG decode or a lead over every other decoder.
 
+## 3 October nightly follow-up
+
+[Nightly run 37111068455](https://github.com/bojosos/ptpng/actions/runs/37111068455)
+tested `9a1dadf` on all five platforms. Within-run geometric mean speedups
+against libpng + zlib-ng level 6 for encoding, and zlib-ng for decoding:
+
+| Platform | Encode speedup | Faster encoder cases | Decode speedup | Faster decoder cases |
+| --- | ---: | ---: | ---: | ---: |
+| Linux x64 | 1.486x | 6/9 | 1.791x | 27/27 |
+| Windows x64 | 1.299x | 6/9 | 1.368x | 25/27 |
+| Linux ARM64 | 1.094x | 3/9 | 1.573x | 27/27 |
+| macOS ARM64 | 1.143x | 4/9 | 1.649x | 27/27 |
+| Windows ARM64 | 1.221x | 5/9 | 1.462x | 26/27 |
+
+RGB-photo encoding lost on every platform, at 0.670–0.929x the reference
+throughput. Gray8 photos measured 0.705–0.949x, and RGBA16 photos measured
+0.666–0.908x. These were the main targets. Windows noise-to-RGB8 decode
+measured 0.959x on x64 and 0.978x on ARM64; Windows x64 RGB-graphics-to-RGBA8
+decode measured 0.940x. Runner CPUs differ, so these ratios compare the
+engines within each run, not raw times between nightlies.
+
+Fresh local VTune software samples on the i7-1355U attributed 84.2% of
+RGB-photo encoder CPU time to the long matcher. Gray8 encoding instead
+spent 37.2% in short matching and 23.7% in long matching. The changes target
+those loops while retaining hashes, chain limits, candidate ordering,
+literal-cost estimates, filter choices and encoded bytes:
+
+- Reject candidates with four bytes ending at the current best match's
+  length before scanning their prefix. The six-byte prefix already proves
+  an improvement over five, so those initial matches skip the extra probe.
+- Return immediately for empty chains and compare three-byte prefixes
+  together on known little-endian word-store targets. Calculate literal
+  costs only for actual matches, with explicit sums for three to five bytes
+  instead of a loop. Short input tails stay bounded.
+- Expand eight RGB pixels per AVX2 iteration and compact RGBA to RGB with
+  exact output stores. ARM Clang/MSVC use structured NEON loads and stores
+  for alpha removal; GCC retains its faster auto-vectorized converter.
+
+[Paired run 37142445201](https://github.com/bojosos/ptpng/actions/runs/37142445201)
+compares `d2c3be7` with the nightly's `9a1dadf`, using nine alternating pairs
+for each of 22 workloads. Timed loops run for at least 0.5 seconds. Linux
+and Windows pin both versions to logical CPU 0; macOS remains OS scheduled.
+The values below are median candidate/baseline throughput ratios. All 990
+old/new output-size pairs match, including 405 encoder pairs.
+
+| Platform | RGB photo encode | Gray8 photo encode | Gray16 photo encode | Noise-to-RGB8 decode |
+| --- | ---: | ---: | ---: | ---: |
+| Linux x64 | 1.123x | 1.013x | 1.100x | 1.164x |
+| Windows x64 | 1.139x | 1.056x | 1.111x | 0.988x |
+| Linux ARM64 | 1.075x | 1.034x | 1.067x | 1.001x |
+| macOS ARM64 | 1.158x | 1.155x | 1.112x | 1.044x |
+| Windows ARM64 | 1.153x | 1.082x | 1.129x | 1.038x |
+
+RGB-photo encoding improved in every pair on all five platforms. Gray16
+improved in every pair except on Windows x64, whose range was 0.939–1.310x.
+Gray8 gains are less certain on Linux and macOS; Windows ARM64's range was
+1.047–1.129x. Nine-image encoder geometric means improved 2.0–4.9%.
+
+This patch does not improve every case. RGBA16-photo encoder medians are
+0.971–1.030x and retain wide ranges, so that reference gap remains. Noise
+encoding measured 0.986x on Linux x64 and 0.988x on Linux ARM64. The x64
+range was 0.977–1.001x, so a small slowdown remains plausible. Windows x64
+RGB conversion gains did not reproduce reliably; noise-to-RGB8 pairs ranged
+0.893–1.042x. Linux x64 noise-to-RGB8's 1.164x median also had outliers,
+0.862–1.679x. These are observed ranges, not confidence intervals. macOS
+has broad scheduling variation, including unchanged decoder controls.
+
+The final code passed all eight jobs in
+[CI run 37142293785](https://github.com/bojosos/ptpng/actions/runs/37142293785),
+including Linux ASan/UBSan and all five platform correctness builds. Nine
+local tests passed, including independent libpng/zlib parity. Differential
+checks against `9a1dadf` verified 2,108 raw streams with independent zlib and
+byte-identical PNG output for all eleven local fixtures, including two
+interlaced input variants. Converter tests cover lengths 0–65 at all 32
+byte alignments, exact input allocations and output guards; existing tests
+retain multi-row RGB transparency coverage.
+
+[Fuzz run 37142295688](https://github.com/bojosos/ptpng/actions/runs/37142295688)
+passed 1,494,559 executions across decode, inflate, PNG encode and raw
+DEFLATE on x64/ARM64, with ASan/UBSan and 60 seconds per target. This
+includes 1,278 raw-compressor cases reaching inputs up to 2 MiB. These
+bounded campaigns and synthetic fixtures do not prove correctness or
+performance for every input.
+
 ## 1 October encoder compression
 
 The default encoder now scores every byte in each row, using AVX2/NEON

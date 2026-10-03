@@ -78,8 +78,9 @@ def main():
     for name in ("photo_rgb8", "graphic_rgb8"):
         if name in args.images:
             workloads.append(("decode", name, "rgba8"))
-    if "noise_rgba8" in args.images:
-        workloads.append(("decode", "noise_rgba8", "rgb8"))
+    for name in ("photo_rgba8", "noise_rgba8"):
+        if name in args.images:
+            workloads.append(("decode", name, "rgb8"))
     for operation, name, fmt in workloads:
         pairs = []
         for iteration in range(args.pairs):
