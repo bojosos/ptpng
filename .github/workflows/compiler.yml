@@ -1,0 +1,97 @@
+name: Windows compiler performance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compiler-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Generate shared inputs
+        run: |
+          python -m pip install --quiet pillow
+          python tests/gen_bench.py
+          python tests/gen_bench16.py
+      - name: Build MSVC and Clang with the same Release settings
+        run: |
+          cmake -S . -B compiler-msvc -A x64 -DPTPNG_WITH_LIBPNG=OFF
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build compiler-msvc --config Release --parallel 2
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ctest --test-dir compiler-msvc -C Release --output-on-failure
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake -S . -B compiler-clang -A x64 -T ClangCL -DPTPNG_WITH_LIBPNG=OFF
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build compiler-clang --config Release --parallel 2
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ctest --test-dir compiler-clang -C Release --output-on-failure
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Train Clang PGO on all fixtures and unit tests
+        run: |
+          New-Item -ItemType Directory -Path compiler-profiles -Force | Out-Null
+          $env:LLVM_PROFILE_FILE = (Join-Path $PWD 'compiler-profiles/%m-%p.profraw')
+          cmake -S . -B compiler-instrument -A x64 -T ClangCL -DPTPNG_WITH_LIBPNG=OFF '-DCMAKE_C_FLAGS=/clang:-fprofile-instr-generate'
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build compiler-instrument --config Release --parallel 2
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ctest --test-dir compiler-instrument -C Release --output-on-failure
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          foreach ($png in Get-ChildItem tests/bench/*.png) {
+            foreach ($format in @('native', 'rgba8', 'rgb8')) {
+              ./compiler-instrument/profile_png.exe decode $png.FullName 0.1 $format
+              if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            }
+            $format = if ($png.Name -eq 'graphic_pal8.png') { 'rgba8' } else { 'native' }
+            ./compiler-instrument/profile_png.exe encode $png.FullName 0.1 $format
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          $vswhere = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -property installationPath
+          $profdata = Join-Path $vs 'VC/Tools/Llvm/x64/bin/llvm-profdata.exe'
+          $profiles = @(Get-ChildItem compiler-profiles/*.profraw | ForEach-Object FullName)
+          & $profdata merge '-output=compiler-profiles/training.profdata' @profiles
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Remove-Item Env:LLVM_PROFILE_FILE
+      - name: Build and test the PGO version
+        run: |
+          $profile = (Join-Path $PWD 'compiler-profiles/training.profdata').Replace('\', '/')
+          cmake -S . -B compiler-pgo -A x64 -T ClangCL -DPTPNG_WITH_LIBPNG=OFF "-DCMAKE_C_FLAGS=/clang:-fprofile-instr-use=$profile"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build compiler-pgo --config Release --parallel 2
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ctest --test-dir compiler-pgo -C Release --output-on-failure
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Measure alternating compiler pairs
+        run: |
+          New-Item -ItemType Directory -Path compiler-results -Force | Out-Null
+          git rev-parse HEAD > compiler-results/revision.txt
+          python tools/bench_metadata.py compiler-results/machine.json
+          python tools/compare_profiles.py compiler-msvc/profile_png.exe compiler-clang/profile_png.exe compiler-results/clang-vs-msvc --pairs 7 --seconds 0.5
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python tools/compare_profiles.py compiler-clang/profile_png.exe compiler-pgo/profile_png.exe compiler-results/pgo-vs-clang --pairs 7 --seconds 0.5
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python tools/compare_profiles.py compiler-msvc/profile_png.exe compiler-pgo/profile_png.exe compiler-results/pgo-vs-msvc --pairs 7 --seconds 0.5
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compiler-windows-x64
+          path: |
+            compiler-results/
+            compiler-profiles/training.profdata
+          retention-days: 14
