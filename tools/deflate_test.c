@@ -16,14 +16,18 @@ static int check_compression_quality(void)
     uint32_t state = UINT32_C(0x87ad130f);
     unsigned mode;
     if (!src || !reference) { free(src); free(reference); return 1; }
-    for (mode = 0; mode < 3; ++mode) {
+    for (mode = 0; mode < 5; ++mode) {
         uint8_t *encoded = NULL;
         size_t encoded_size = 0, i;
         uLongf reference_size = compressBound((uLong)size);
         for (i = 0; i < size; ++i) {
             state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+            /* Binary residuals put more than 64 candidates in six-byte
+             * hash chains. Retain quality there and on mixed content. */
             src[i] = mode == 0 ? 0 : mode == 1 ? (uint8_t)(state & 3) :
-                i < size/2 ? (uint8_t)(state & 3) : (uint8_t)state;
+                mode == 2 ? (i < size/2 ? (uint8_t)(state & 3) : (uint8_t)state) :
+                mode == 3 ? (uint8_t)(state & 1) :
+                i < size/2 ? (uint8_t)(state & 1) : (uint8_t)state;
         }
         if (compress2(reference, &reference_size, src, (uLong)size, 6) != Z_OK ||
             ptpng_deflate(src, size, &encoded, &encoded_size) != PTPNG_OK ||

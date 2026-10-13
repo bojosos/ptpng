@@ -4,6 +4,180 @@ ptpng targets fast single-threaded PNG decoding on x86 AVX2 and ARM64
 NEON. A kernel benchmark measures one operation; it does not establish
 the speed of a complete PNG decode or a lead over every other decoder.
 
+## 14 October follow-up
+
+The [forced nightly](https://github.com/bojosos/ptpng/actions/runs/38465890719)
+tested the merged `6b2bcfb` source. The earlier 13 October scheduled run
+tested `9a1dadf`, before PR #1 merged. Both nightlies and the merge's CI
+and fuzzing passed. The new nightly's within-run geometric mean speedups
+against libpng + zlib-ng are:
+
+| Platform | Decode speedup | Encode speedup vs level 6 |
+| --- | ---: | ---: |
+| Linux x64 | 1.812x | 1.522x |
+| Windows x64 | 1.613x | 1.479x |
+| Linux ARM64 | 1.611x | 1.147x |
+| macOS ARM64 | 1.649x | 1.192x |
+| Windows ARM64 | 1.464x | 1.256x |
+
+These use 27 decoder cases and nine encoder cases. Photo encoders still
+lose some comparisons, and Windows noise decoding remains slightly behind
+the reference. Different nightly CPUs prevent attributing raw timing
+changes to the merge.
+
+The [same-machine merge comparison](https://github.com/bojosos/ptpng/actions/runs/38465894004)
+tests `6b2bcfb` against its `9a1dadf` first parent. Each of 23 workloads has
+seven alternating pairs with at least 0.5 seconds per timed loop. Linux
+and Windows pin both versions to one logical CPU; macOS is OS scheduled.
+All 805 output-size pairs match, including 315 encoder pairs. The values
+below are median candidate/baseline throughput ratios:
+
+| Platform | RGB photo encode | Gray16 photo encode | RGB graphics to RGBA8 | Palette to RGB8 |
+| --- | ---: | ---: | ---: | ---: |
+| Linux x64 | 1.111x | 1.079x | 1.071x | 0.995x |
+| Windows x64 | 1.160x | 1.148x | 1.058x | 0.930x |
+| Linux ARM64 | 1.076x | 1.067x | 1.004x | 1.003x |
+| macOS ARM64 | 1.139x | 1.153x | 1.215x | 0.935x |
+| Windows ARM64 | 1.153x | 1.125x | 1.127x | 1.001x |
+
+Every RGB-photo encoder pair improves on all five platforms. The merge
+also has losses: the three graphics encoder cases measure 0.881–0.902x
+on Linux x64 and 0.871–0.907x on Windows x64. Windows x64 palette-to-RGB
+decode measures 0.930x, with six of seven pairs slower. Linux x64 Gray16
+native decode is 0.961x, and Windows ARM64 RGBA16 graphics native decode
+is 0.970x. These targeted gains do not establish a gain on every image.
+
+A fresh local VTune software profile of the merged source attributes
+81.5% of RGB-photo encoder CPU samples to `deflate_match`, 6.6% to one
+`deflate_insert` site and 2.5% to short matching. It uses the i7-1355U,
+logical CPU 4, with a five-second timed loop plus setup and warm-up.
+Hardware counter collection requires elevation on this machine; the
+software profile is sufficient to identify functions, but its timing is
+not a performance comparison. SIMD filter and checksum kernels leave
+substantial scalar match-search and branch work for compiler tuning.
+
+### Retained save and load changes
+
+The original prefix-load reuse experiment improved graphics saving on
+EPYC 7763 but stayed near parity on EPYC 9V74 and retained small photo
+losses. The [full comparison](https://github.com/bojosos/ptpng/actions/runs/38467663609)
+and [focused repeat](https://github.com/bojosos/ptpng/actions/runs/38468982176)
+did not support keeping that matcher change. It has been removed.
+
+The retained encoder caps long match searches at 64 candidates rather
+than 128. Lookahead searches starting with an eight-byte match retain
+the existing quarter-budget rule. Hashes, short matching, filter scoring
+and DEFLATE block-cost selection remain unchanged. This changes some
+compression decisions and encoded bytes while preserving filtered pixels.
+The existing `DEFLATE_CHAIN` build definition can still select another cap.
+
+MSVC x64 palette-to-RGB conversion replaces AVX2 gathering with eight
+independent scalar table lookups, then retains the existing vector packing
+and exact 24-byte stores. Scalar tails handle the last zero to seven pixels.
+Other compilers and ARM retain their existing converters.
+
+The [final comparison](https://github.com/bojosos/ptpng/actions/runs/38470200992)
+tests `787b592` against merged `6b2bcfb`, five alternating pairs per
+workload with at least 0.3 seconds per timed loop. The table reports median
+candidate/baseline throughput ratios:
+
+| Platform | RGB photo encode | Gray16 photo encode | Nine-image encode geometric mean | Palette to RGB8 decode |
+| --- | ---: | ---: | ---: | ---: |
+| Linux x64 | 1.501x | 1.239x | 1.079x | 1.000x |
+| Windows x64 | 1.496x | 1.238x | 1.107x | 1.181x |
+| Linux ARM64 | 1.488x | 1.228x | 1.064x | 1.003x |
+| macOS ARM64 | 1.619x | 1.103x | 1.080x | 0.940x |
+| Windows ARM64 | 1.495x | 1.230x | 1.082x | 1.000x |
+
+Every RGB-photo encoder pair improves on every platform. All Gray16
+pairs improve on Linux and Windows. macOS Gray16 ranges 0.908–1.338x;
+its other controls also have broad OS scheduling variation. Windows
+palette-to-RGB pairs range 1.147–1.187x. The two earlier checks measured
+1.179x and 1.138x, with every pair faster. Local i7-1355U pairs measured
+1.607x, so the gain depends on the CPU.
+
+The change does not improve every workload. Linux ARM64 RGBA16 photo
+encoding measures 0.976x, with all five pairs between 0.945–0.996x.
+Its noise encoding measures 0.985x, with a 0.981–1.001x range. macOS noise
+encode measures 0.929x with a 0.792–1.072x range, and its decoder controls
+also swing. These results support the photo and Windows palette gains,
+not a universal speedup.
+
+RGB-photo PNG size grows from 5,357,962 to 5,459,744 bytes, or 1.900%.
+Gray16 grows from 3,832,479 to 3,835,322 bytes, or 0.074%. The other seven
+encoder fixtures stay the same size or shrink, including graphics shrinking
+0.31–0.48%. All 225 candidate encoder-size observations agree across the
+five platforms. Each fixture remains at most 2.045% larger than the
+zlib-ng level-6 reference, within the previous 2.4% fixture bound. This
+size bound describes these fixtures, not arbitrary images.
+
+All 575 pairs retain matching input and decoded sizes. Local differential
+validation verifies 2,108 raw streams with independent zlib; those raw
+streams happen to retain identical compressed bytes. Eleven complete PNG
+fixtures, including interlaced inputs, retain identical filtered pixels
+when their IDAT streams are decompressed with independent zlib.
+Nine local tests and all eight jobs in
+[CI run 38470210983](https://github.com/bojosos/ptpng/actions/runs/38470210983)
+passed. Palette tests cover lengths 0–65, all 32 alignments, exact input
+allocations and output guards for RGB and RGBA conversion. Compression
+quality checks additionally cover binary residuals with deep hash chains
+and binary/noise mixtures against zlib level 6.
+
+[Fuzz run 38470211035](https://github.com/bojosos/ptpng/actions/runs/38470211035)
+completed 734,167 executions across decode, inflate, PNG encode and raw
+DEFLATE on x64/ARM64 without a reported sanitizer finding. These are bounded
+checks; the raw compressor corpus includes inputs up to 2 MiB.
+
+### Compiler measurements
+
+ClangCL previously failed to build the x86 checksum translation unit
+because its PCLMUL target flag was missing. The build now enables that
+instruction only for that runtime-dispatched translation unit. Ordinary
+MSVC builds retain their compiler flags.
+
+The [Windows compiler workflow](.github/workflows/compiler.yml) builds
+MSVC, ClangCL, an instrumented ClangCL trainer and a ClangCL PGO version.
+Training uses all nine benchmark images in native/RGB8/RGBA8 output and
+the unit tests. Alternating comparisons measure Clang/MSVC, PGO/Clang and
+PGO/MSVC on the same runner. Training and measurement share synthetic
+fixtures, so any gains need validation on the consuming application's
+images before choosing a compiler for release builds. This workflow
+keeps compiler tuning separate from source changes and the nightly
+dashboard; it does not enable PGO or change the default compiler.
+
+Local Clang 19.1.5 and frontend-instrumented PGO builds passed six unit
+tests. Independent differential checks against merged-source MSVC match
+2,108 raw compressed streams and eleven complete PNGs byte-for-byte for
+both compilers. Local paired timings had severe CPU scheduling variation,
+including RGB-photo PGO ratios spanning 0.263–2.560x, so they do not
+support a compiler recommendation. ICX is not installed on this machine
+and has not been measured.
+
+The [controlled compiler run](https://github.com/bojosos/ptpng/actions/runs/38467669393)
+used MSVC 19.51.36260 and ClangCL 22.1.3 on a Xeon Platinum 8573C.
+It tested `d10be1b`, the earlier 128-candidate prefix-reuse experiment,
+before the final search-budget change. Each comparison has seven
+alternating half-second pairs for the same 23 workloads. Encoder and
+decoder means weight their nine and fourteen cases equally:
+
+| Comparison | Encode geometric mean | Decode geometric mean |
+| --- | ---: | ---: |
+| Clang / MSVC | 0.986x | 0.988x |
+| Clang PGO / Clang | 1.055x | 1.008x |
+| Clang PGO / MSVC | 1.042x | 0.990x |
+
+PGO improves Clang's Gray8 photo encoding 8.2%, RGBA8 8.0%, RGBA16 10.8%
+and noise 16.3%. Every pair improves in these four cases. It also retains
+losses: RGB graphics decode is 0.980x versus Clang, with every pair slower.
+Clang PGO's RGBA16 graphics decode is 0.902x versus MSVC, while RGB-photo
+encode is 0.978x with all seven pairs slower. Some comparisons have large
+outliers, including unchanged graphics encoder controls. All output-size
+pairs match and all four builds pass their six unit tests. These results
+show useful PGO gains despite explicit SIMD, but do not justify replacing
+MSVC as the default Windows compiler or predict performance with the final
+64-candidate encoder. Profiles need regeneration when source or workloads
+change.
+
 ## 3 October nightly follow-up
 
 [Nightly run 37111068455](https://github.com/bojosos/ptpng/actions/runs/37111068455)

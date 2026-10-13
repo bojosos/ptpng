@@ -156,6 +156,15 @@ RGB-photo encoding by 7.5–15.8% and Gray16-photo encoding by 6.7–12.9% in
 same-machine comparisons across all five platforms, with unchanged PNG
 bytes. Some workloads retain small losses; see the full measurements.
 
+The [14 October follow-up](PERFORMANCE.md#14-october-follow-up) improves
+RGB-photo encoding throughput by 49–62% across all five platforms and
+Gray16-photo encoding by about 23–24% on Linux and Windows. Its shorter
+match searches grow the RGB-photo PNG by 1.9% and Gray16 by 0.074%; the
+other fixtures stay the same size or shrink. Windows x64 palette-to-RGB
+loading improves 13.8–18.1% in hosted paired measurements. Some cases
+remain slower. A separate Clang/PGO experiment helps average saving but
+does not justify changing the default Windows compiler.
+
 See [per-image times and file sizes](PERFORMANCE.md#30-september-benchmark-snapshot)
 or the [live dashboard](https://bojosos.github.io/ptpng/bench/) for all
 platforms, output formats and reference levels. The dashboard keeps full

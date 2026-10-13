@@ -100,7 +100,7 @@ PTPNG_API_INLINE unsigned deflate_log2(unsigned value)
 #define DEFLATE_TOKENS 32768
 #define DEFLATE_BLOCK_BYTES (1024u * 1024u)
 #ifndef DEFLATE_CHAIN
-#define DEFLATE_CHAIN 128
+#define DEFLATE_CHAIN 64
 #endif
 
 typedef struct { uint16_t value, distance; } deflate_token;

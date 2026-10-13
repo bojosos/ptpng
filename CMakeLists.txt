@@ -43,7 +43,10 @@ if(PTPNG_X86)
         set_source_files_properties(src/ptpng_avx2.c src/ptpng_encode_avx2.c PROPERTIES
                                     COMPILE_OPTIONS "-mavx2")
     endif()
-    if(NOT MSVC)
+    if(MSVC AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        set_source_files_properties(src/ptpng_crc_x86.c PROPERTIES
+                                    COMPILE_OPTIONS "/clang:-mpclmul;/clang:-msse2")
+    elseif(NOT MSVC)
         set_source_files_properties(src/ptpng_crc_x86.c PROPERTIES
                                     COMPILE_OPTIONS "-mpclmul;-msse2")
     endif()

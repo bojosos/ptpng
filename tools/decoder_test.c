@@ -340,6 +340,46 @@ static void test_color_conversion_boundaries(void)
     }
 }
 
+static void test_palette_conversion_boundaries(void)
+{
+    struct ptpng_cvt cvt = {0};
+    unsigned char palette[256 * 3], alpha[256];
+    unsigned rgba, n, offset, i, channel;
+    ptpng_cpu_init();
+    cvt.palette = palette;
+    cvt.trans = alpha;
+    cvt.num_trans = 256;
+    for (i = 0; i < 256; ++i) {
+        for (channel = 0; channel < 4; ++channel) {
+            cvt.pal_rgba[i * 4 + channel] = (unsigned char)(i * 37 + channel * 61);
+            if (channel < 3) palette[i * 3 + channel] = cvt.pal_rgba[i * 4 + channel];
+            else alpha[i] = cvt.pal_rgba[i * 4 + channel];
+        }
+    }
+    for (rgba = 0; rgba < 2; ++rgba)
+    for (n = 0; n <= 65; ++n)
+    for (offset = 0; offset < 32; ++offset) {
+        unsigned channels = rgba ? 4 : 3;
+        size_t output_size = (size_t)n * channels;
+        unsigned char *src = (unsigned char *)malloc(n + offset ? n + offset : 1);
+        unsigned char *dst = (unsigned char *)malloc(output_size + offset + 1);
+        unsigned char expected[65 * 4];
+        ptpng_cvt_fn fn = rgba ? ptpng_cpu.cvt_table_rgba8[(3 << 4) | 3] :
+                                ptpng_cpu.cvt_table_rgb8[(3 << 4) | 3];
+        if (!src || !dst) { free(src); free(dst); CHECK(0); return; }
+        for (i = 0; i < n; ++i) {
+            src[offset + i] = (unsigned char)(i * 17 + n * 11);
+            memcpy(expected + i * channels, cvt.pal_rgba + src[offset + i] * 4, channels);
+        }
+        memset(dst, 0xa5, output_size + offset + 1);
+        fn(src + offset, dst + offset, n, &cvt);
+        CHECK(memcmp(dst + offset, expected, output_size) == 0);
+        CHECK(dst[offset + output_size] == 0xa5);
+        for (i = 0; i < offset; ++i) CHECK(dst[i] == 0xa5);
+        free(src); free(dst);
+    }
+}
+
 static void test_mixed_blocks(void)
 {
     /* zlib-generated dynamic, fixed, stored, dynamic blocks, with sync
@@ -505,6 +545,7 @@ int main(void)
     test_matching_output_formats();
     test_rgb_expansion_transparency();
     test_color_conversion_boundaries();
+    test_palette_conversion_boundaries();
     test_mixed_blocks();
     test_literal_boundaries();
     test_match_copies();
