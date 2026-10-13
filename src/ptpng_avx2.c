@@ -483,8 +483,11 @@ static void rgb8_p8_avx2(const uint8_t *src, uint8_t *dst, uint32_t n,
     const __m128i ctrl = _mm_setr_epi8(0, 1, 2, 4, 5, 6, 8, 9,
                                        10, 12, 13, 14, -1, -1, -1, -1);
     for (; n >= 8; n -= 8, src += 8, dst += 24) {
-        __m256i idx = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)src));
-        __m256i v = _mm256_i32gather_epi32((const int *)c->pal_words, idx, 4);
+        /* Independent scalar lookups avoid the AVX2 gather's serial loads. */
+        const uint32_t *tab = c->pal_words;
+        __m128i colors_lo = _mm_set_epi32(tab[src[3]], tab[src[2]], tab[src[1]], tab[src[0]]);
+        __m128i colors_hi = _mm_set_epi32(tab[src[7]], tab[src[6]], tab[src[5]], tab[src[4]]);
+        __m256i v = _mm256_inserti128_si256(_mm256_castsi128_si256(colors_lo), colors_hi, 1);
         __m128i lo, hi;
         v = _mm256_shuffle_epi8(v, _mm256_broadcastsi128_si256(ctrl));
         lo = _mm256_castsi256_si128(v);
