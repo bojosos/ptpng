@@ -343,11 +343,19 @@ static void test_color_conversion_boundaries(void)
 static void test_palette_conversion_boundaries(void)
 {
     struct ptpng_cvt cvt = {0};
+    unsigned char palette[256 * 3], alpha[256];
     unsigned rgba, n, offset, i, channel;
     ptpng_cpu_init();
-    for (i = 0; i < 256; ++i)
-        for (channel = 0; channel < 4; ++channel)
+    cvt.palette = palette;
+    cvt.trans = alpha;
+    cvt.num_trans = 256;
+    for (i = 0; i < 256; ++i) {
+        for (channel = 0; channel < 4; ++channel) {
             cvt.pal_rgba[i * 4 + channel] = (unsigned char)(i * 37 + channel * 61);
+            if (channel < 3) palette[i * 3 + channel] = cvt.pal_rgba[i * 4 + channel];
+            else alpha[i] = cvt.pal_rgba[i * 4 + channel];
+        }
+    }
     for (rgba = 0; rgba < 2; ++rgba)
     for (n = 0; n <= 65; ++n)
     for (offset = 0; offset < 32; ++offset) {
