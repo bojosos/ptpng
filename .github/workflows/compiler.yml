@@ -2,6 +2,9 @@ name: Windows compiler performance
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/compiler.yml'
 
 permissions:
   contents: read
