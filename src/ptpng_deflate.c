@@ -100,7 +100,7 @@ PTPNG_API_INLINE unsigned deflate_log2(unsigned value)
 #define DEFLATE_TOKENS 32768
 #define DEFLATE_BLOCK_BYTES (1024u * 1024u)
 #ifndef DEFLATE_CHAIN
-#define DEFLATE_CHAIN 128
+#define DEFLATE_CHAIN 64
 #endif
 
 typedef struct { uint16_t value, distance; } deflate_token;
@@ -226,6 +226,7 @@ static unsigned deflate_match(const deflate_state *state, const uint8_t *src,
 #if PTPNG_DEFLATE_WORD_STORE
     if (limit >= 8) {
         memcpy(&prefix_word, src + pos, sizeof(prefix_word));
+        prefix_word &= UINT64_C(0x0000ffffffffffff);
     }
 #endif
     if (best >= 8) attempts >>= 2;
@@ -249,25 +250,11 @@ static unsigned deflate_match(const deflate_state *state, const uint8_t *src,
         }
 #if PTPNG_DEFLATE_WORD_STORE
         if (limit >= 8) {
-            uint64_t candidate, difference;
+            uint64_t candidate;
             /* Masking keeps the same six-byte prefix. Both eight-byte loads
              * are bounded by end, including references before pos. */
             memcpy(&candidate, src + ref, sizeof(candidate));
-            difference = candidate ^ prefix_word;
-            matches = (difference & UINT64_C(0x0000ffffffffffff)) == 0;
-            length = 8;
-            if (matches && difference) {
-                /* The prefix load also decides six- and seven-byte matches.
-                 * Reuse it instead of loading another word at byte six. */
-#if defined(_MSC_VER)
-                unsigned long bit;
-                _BitScanForward64(&bit, difference);
-                length = (unsigned)bit >> 3;
-#else
-                length = (unsigned)__builtin_ctzll(difference) >> 3;
-#endif
-                goto match_done;
-            }
+            matches = (candidate & UINT64_C(0x0000ffffffffffff)) == prefix_word;
         } else
 #endif
         {
@@ -276,9 +263,9 @@ static unsigned deflate_match(const deflate_state *state, const uint8_t *src,
             memcpy(&candidate_low, src + ref, sizeof(candidate_low));
             memcpy(&candidate_high, src + ref + 4, sizeof(candidate_high));
             matches = candidate_low == prefix_low && candidate_high == prefix_high;
-            length = 6;
         }
         if (matches) {
+            length = 6;
             while (limit - length >= 8) {
                 uint64_t a, b;
                 memcpy(&a, src + ref + length, sizeof(a));

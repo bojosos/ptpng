@@ -483,7 +483,7 @@ static void rgb8_p8_avx2(const uint8_t *src, uint8_t *dst, uint32_t n,
     const __m128i ctrl = _mm_setr_epi8(0, 1, 2, 4, 5, 6, 8, 9,
                                        10, 12, 13, 14, -1, -1, -1, -1);
     for (; n >= 8; n -= 8, src += 8, dst += 24) {
-        /* Independent scalar lookups avoid the AVX2 gather's serial loads. */
+        /* Issue independent table lookups before packing the RGB bytes. */
         const uint32_t *tab = c->pal_words;
         __m128i colors_lo = _mm_set_epi32(tab[src[3]], tab[src[2]], tab[src[1]], tab[src[0]]);
         __m128i colors_hi = _mm_set_epi32(tab[src[7]], tab[src[6]], tab[src[5]], tab[src[4]]);
