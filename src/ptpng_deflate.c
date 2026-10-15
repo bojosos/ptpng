@@ -102,6 +102,14 @@ PTPNG_API_INLINE unsigned deflate_log2(unsigned value)
 #ifndef DEFLATE_CHAIN
 #define DEFLATE_CHAIN 64
 #endif
+#ifndef DEFLATE_SHORT_CHAIN
+/* Retain MSVC x64's measured baseline after paired decoder/graphics losses. */
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64)
+#define DEFLATE_SHORT_CHAIN 2
+#else
+#define DEFLATE_SHORT_CHAIN 1
+#endif
+#endif
 
 typedef struct { uint16_t value, distance; } deflate_token;
 typedef struct {
@@ -312,7 +320,7 @@ static unsigned deflate_short_match(const deflate_state *state, const uint8_t *s
                                     unsigned *best_distance)
 {
     unsigned limit = (unsigned)(end - pos > 5 ? 5 : end - pos);
-    unsigned attempts = 4, previous_distance = 0, best = 0, best_saving = 0;
+    unsigned attempts = DEFLATE_SHORT_CHAIN, previous_distance = 0, best = 0, best_saving = 0;
     unsigned distance_best = 0;
     uint32_t link;
 #if PTPNG_DEFLATE_WORD_STORE
