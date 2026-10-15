@@ -80,6 +80,11 @@ int main(void)
             printf("adler large FAIL pattern=%u\n", i);
             return 1;
         }
+        if (ptpng_crc32(buf, n) != ptpng_crc32_slice8(buf, n)) {
+            printf("crc large FAIL pattern=%u\n", i);
+            free(buf);
+            return 1;
+        }
         free(buf);
     }
     /* Cross SIMD chunk boundaries and every AVX2 alignment, with an
@@ -87,6 +92,7 @@ int main(void)
     for (i = 0; i < 32; i++) {
         static const size_t lengths[] = {0,1,7,8,15,16,17,31,32,33,63,64,65,
                                         127,128,129,255,256,257,511,512,513,
+                                        767,768,769,1535,1536,1537,
                                         2047,2048,2049,4095,4096,4097,8191,8192,8193};
         for (j = 0; j < sizeof(lengths) / sizeof(lengths[0]); j++) {
             size_t n = lengths[j], k;
