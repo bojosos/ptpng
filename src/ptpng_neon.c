@@ -160,19 +160,60 @@ tail:
     }
 }
 
-#if defined(__clang__)
+/* RGB8/RGB16 have three/six independent byte chains. Exact-sized copies
+ * keep the vector input and output within the logical row, including Adam7. */
+#define PAETH_RGB_NEON(BPP)                                              \
+static void paeth_rgb##BPP##_neon(uint8_t *dst, const uint8_t *src,        \
+                                  const uint8_t *prev, size_t count)     \
+{                                                                       \
+    size_t i = 0;                                                       \
+    uint16x8_t a = vdupq_n_u16(0), c = vdupq_n_u16(0);                   \
+    for (; count - i >= (BPP); i += (BPP)) {                            \
+        uint64_t sv = 0, bv = 0, output;                                \
+        uint16x8_t b, s;                                                \
+        memcpy(&sv, src + i, (BPP));                                    \
+        memcpy(&bv, prev + i, (BPP));                                   \
+        s = vmovl_u8(vcreate_u8(sv));                                   \
+        b = vmovl_u8(vcreate_u8(bv));                                   \
+        a = paeth_pixel_neon(s, a, b, c);                               \
+        c = b;                                                         \
+        output = vget_lane_u64(vreinterpret_u64_u8(vmovn_u16(a)), 0);    \
+        memcpy(dst + i, &output, (BPP));                                \
+    }                                                                   \
+    for (; i < count; ++i) {                                            \
+        int left = i >= (BPP) ? dst[i - (BPP)] : 0;                      \
+        int up = prev[i], ul = i >= (BPP) ? prev[i - (BPP)] : 0;         \
+        int lo = left < up ? left : up, hi = left < up ? up : left;      \
+        int threshold = 3 * ul - left - up;                             \
+        int predictor = threshold >= hi ? lo : threshold <= lo ? hi : ul;\
+        dst[i] = (uint8_t)(src[i] + predictor);                          \
+    }                                                                   \
+}
+PAETH_RGB_NEON(3)
+PAETH_RGB_NEON(6)
+#undef PAETH_RGB_NEON
+
 static void ptpng_filter_paeth_neon_dispatch(uint8_t *dst, const uint8_t *src,
                                             const uint8_t *prev, size_t count,
                                             unsigned bpp)
 {
+    if (bpp == 3) {
+        paeth_rgb3_neon(dst, src, prev, count);
+        return;
+    }
+    if (bpp == 6) {
+        paeth_rgb6_neon(dst, src, prev, count);
+        return;
+    }
+#if defined(__clang__)
     /* Clang favors scalar four-byte chains. GCC retains SIMD because
      * its scalar fourth-channel branch slows random-alpha images. */
     if (bpp == 4)
         ptpng_filter_paeth_scalar(dst, src, prev, count, bpp);
     else
+#endif
         ptpng_filter_paeth_neon(dst, src, prev, count, bpp);
 }
-#endif
 
 /* Collect byte columns in independent 16-bit sums, then apply positional
  * weights once per chunk. A column reaches at most 32*255=8160; the full
@@ -492,11 +533,7 @@ void ptpng_neon_init(void)
     ptpng_cpu.filter_sub = ptpng_filter_sub_neon;
     ptpng_cpu.adler32 = ptpng_adler32_neon;
     ptpng_cpu.filter_up = ptpng_filter_up_neon;
-#if defined(__clang__)
     ptpng_cpu.filter_paeth = ptpng_filter_paeth_neon_dispatch;
-#else
-    ptpng_cpu.filter_paeth = ptpng_filter_paeth_neon;
-#endif
     ptpng_cpu.cvt_table_rgba8 = ptpng_cvt_table_rgba8_neon;
     ptpng_cpu.cvt_table_rgb8 = ptpng_cvt_table_rgb8_neon;
     ptpng_cvt_table_rgba8_neon[(0 << 4) | 3] = rgba8_g8_neon;
