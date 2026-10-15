@@ -301,6 +301,10 @@ void ptpng_filter_up_neon(uint8_t *dst, const uint8_t *src,
 
 /* Palette8 -> RGB8: look up independent colors, then remove alpha before
  * storing twelve bytes. The packed palette may be unaligned. */
+#if defined(__GNUC__) && !defined(__clang__)
+/* Keep this new kernel after the existing text so GCC retains Paeth's layout. */
+__attribute__((section(".text.ptpng_palette")))
+#endif
 static void rgb8_p8_neon(const uint8_t *src, uint8_t *dst, uint32_t n,
                          const struct ptpng_cvt *c)
 {
