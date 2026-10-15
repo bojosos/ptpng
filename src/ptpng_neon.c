@@ -299,6 +299,35 @@ void ptpng_filter_up_neon(uint8_t *dst, const uint8_t *src,
 
 /* ---- conversions (mirror of the pshufb versions) ---- */
 
+/* Palette8 -> RGB8: look up independent colors, then remove alpha before
+ * storing twelve bytes. The packed palette may be unaligned. */
+static void rgb8_p8_neon(const uint8_t *src, uint8_t *dst, uint32_t n,
+                         const struct ptpng_cvt *c)
+{
+    static const uint8_t pick_bytes[16] = {
+        0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 16, 16, 16, 16 };
+    const uint8x16_t pick = vld1q_u8(pick_bytes);
+    for (; n >= 4; n -= 4, src += 4, dst += 12) {
+        uint32_t a, b, d, e, tail;
+        uint32x4_t colors;
+        uint8x16_t rgb;
+        memcpy(&a, c->pal_rgba + (size_t)src[0] * 4, 4);
+        memcpy(&b, c->pal_rgba + (size_t)src[1] * 4, 4);
+        memcpy(&d, c->pal_rgba + (size_t)src[2] * 4, 4);
+        memcpy(&e, c->pal_rgba + (size_t)src[3] * 4, 4);
+        colors = vdupq_n_u32(a);
+        colors = vsetq_lane_u32(b, colors, 1);
+        colors = vsetq_lane_u32(d, colors, 2);
+        colors = vsetq_lane_u32(e, colors, 3);
+        rgb = vqtbl1q_u8(vreinterpretq_u8_u32(colors), pick);
+        vst1_u8(dst, vget_low_u8(rgb));
+        tail = vgetq_lane_u32(vreinterpretq_u32_u8(rgb), 2);
+        memcpy(dst + 8, &tail, 4);
+    }
+    for (; n; --n, ++src, dst += 3)
+        memcpy(dst, c->pal_rgba + (size_t)*src * 4, 3);
+}
+
 /* RGB8 -> RGBA8. Structured loads/stores expand sixteen pixels without
  * overlapping source loads or byte lookup tables. tRNS uses the scalar
  * converter selected by ptpng_decode before this function is called. */
@@ -503,6 +532,7 @@ void ptpng_neon_init(void)
     ptpng_cvt_table_rgba8_neon[(2 << 4) | 3] = rgba8_rgb8_neon;
     ptpng_cvt_table_rgba8_neon[(4 << 4) | 3] = rgba8_ga8_neon;
     ptpng_cvt_table_rgba8_neon[(6 << 4) | 4] = rgba8_rgba16_neon;
+    ptpng_cvt_table_rgb8_neon[(3 << 4) | 3] = rgb8_p8_neon;
     /* GCC's scalar converter auto-vectorizes faster on Neoverse-N2. */
 #if defined(__clang__) || defined(_MSC_VER)
     ptpng_cvt_table_rgb8_neon[(6 << 4) | 3] = rgb8_rgba8_neon;
