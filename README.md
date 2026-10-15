@@ -172,6 +172,15 @@ short-match search budget grows affected files by at most 0.314%; graphics
 and noise sizes stay unchanged. macOS timings vary more, and some other
 workloads retain small losses.
 
+The [parallel follow-up](PERFORMANCE.md#15-october-parallel-experiments)
+compares nine isolated experiments and combines row-buffer reuse with a
+one-candidate short-match search on Linux x64/ARM64, macOS ARM64 and Windows
+ARM64. MSVC x64 retains its earlier encoder after repeatable losses in the
+unconditional experiment. The optimized paths measured another 4.3–6.2%
+average encoding gain over the earlier 15 October build, including 6.5–15.6% for
+noise. Their largest additional fixture growth is 0.779%; MSVC x64 retains
+its previous PNG sizes. The full measurements include remaining losses.
+
 See [per-image times and file sizes](PERFORMANCE.md#30-september-benchmark-snapshot)
 or the [live dashboard](https://bojosos.github.io/ptpng/bench/) for all
 platforms, output formats and reference levels. The dashboard keeps full

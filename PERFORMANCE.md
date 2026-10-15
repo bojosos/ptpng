@@ -4,6 +4,143 @@ ptpng targets fast single-threaded PNG decoding on x86 AVX2 and ARM64
 NEON. A kernel benchmark measures one operation; it does not establish
 the speed of a complete PNG decode or a lead over every other decoder.
 
+## 15 October parallel experiments
+
+This round starts from `56bed94`, including the two-candidate short matcher
+from the earlier 15 October work. Nine isolated candidates each receive
+five alternating 0.3-second pairs for 23 workloads on five platforms.
+All 5,175 pairs have matching input and decoded sizes. Eight candidates
+preserve encoder sizes; the one-candidate search intentionally changes them.
+
+| Experiment | Paired run | Outcome |
+| --- | --- | --- |
+| Rotate output/scratch buffers after a filter improves | [38700992169](https://github.com/bojosos/ptpng/actions/runs/38700992169) | Encoder mean improves 0.8–2.7%; retained outside MSVC x64 after the combined checks. |
+| Fuse filtering and scoring | [38701277897](https://github.com/bojosos/ptpng/actions/runs/38701277897) | Excluded. Linux x64 graphics slow 6.8–8.0%, with every pair slower. |
+| Reuse short-match prefix loads and prune searches | [38701153785](https://github.com/bojosos/ptpng/actions/runs/38701153785) | Excluded. Mixed photo gains and consistent Linux ARM graphics losses. |
+| Skip long-match bytes already proved equal | [38701549965](https://github.com/bojosos/ptpng/actions/runs/38701549965) | Excluded. Windows x64 RGB-photo encoding loses 5%, with every pair slower. |
+| Keep only short-search pruning | [38701902018](https://github.com/bojosos/ptpng/actions/runs/38701902018) | Excluded. Linux ARM graphics remain 0.7–0.9% slower. |
+| Reuse Huffman heap order instead of sorting leaves again | [38701144117](https://github.com/bojosos/ptpng/actions/runs/38701144117) | Excluded. Linux x64 graphics slow 7.4–8.8%. |
+| Prove stored blocks cheaper using a Kraft lower bound | [38701953703](https://github.com/bojosos/ptpng/actions/runs/38701953703) | Left experimental. Linux/Windows noise improves 2.2–5.8%, but some photos lose 0.6–1.1%. |
+| Decode six literals per refill | [38701108394](https://github.com/bojosos/ptpng/actions/runs/38701108394) | Excluded. Linux x64 RGBA16-photo decode loses 2.4%, with all five pairs at 0.974–0.976x. |
+| Search one short-match candidate instead of two | [38702129642](https://github.com/bojosos/ptpng/actions/runs/38702129642) | Encoder mean improves 3.3–5.8%; retained outside MSVC x64 after the combined checks. |
+
+All comparisons use immutable baseline/candidate revisions and shared inputs.
+Linux and Windows pin both versions to one logical CPU; macOS remains OS
+scheduled and has substantially wider pair ranges. Removing source-level
+work does not guarantee faster generated code; the rejected changes above
+are not included in the combined candidate.
+
+The [fresh baseline profiles](https://github.com/bojosos/ptpng/actions/runs/38700687772)
+use hardware cycles on ARM64 and software timer samples on x64. RGB-photo
+encoding still attributes 79.1%/84.0% of self samples to long matching on
+ARM64/x64. Noise attributes 25.4%/27.2% to long matching and 20.1%/27.7% to
+short matching. Inlined compression work accounts for another 49.1%/40.0%.
+ARM assembly annotations point to dictionary insertion stores as a large
+part of that inlined work. These are sampled costs, including setup and
+warm-up, not stage timings.
+
+### Combined measurements and platform selection
+
+The first combined candidate sets `DEFLATE_SHORT_CHAIN` to one and alternates the
+existing output and scratch rows when a filter improves. At most one final
+row copy is needed. Filter scores, tie choices and first-row rules stay the
+same. A separate byte comparison confirms that buffer rotation alone leaves
+all 2,108 raw test streams and eleven complete PNGs identical. The combined
+encoder is also byte-identical to the isolated one-candidate encoder on
+those inputs. Long matching retains its 64-candidate cap.
+
+The [combined comparison](https://github.com/bojosos/ptpng/actions/runs/38702421393)
+tests `fb3cafd` against `56bed94`, with seven alternating half-second pairs
+per workload. Median candidate/baseline throughput ratios are:
+
+| Platform | Gray8 photo encode | RGBA16 photo encode | Noise encode | Nine-image encode geometric mean |
+| --- | ---: | ---: | ---: | ---: |
+| Linux x64 | 1.147x | 1.156x | 1.103x | 1.072x |
+| Windows x64 | 1.136x | 1.130x | 1.049x | 1.049x |
+| Linux ARM64 | 1.161x | 1.168x | 1.151x | 1.068x |
+| macOS ARM64 | 1.125x | 1.034x | 1.067x | 1.043x |
+| Windows ARM64 | 1.138x | 1.201x | 1.086x | 1.051x |
+
+Every pair improves for Gray8-photo and noise encoding on all five platforms.
+RGBA16-photo encoding improves in every Linux/Windows pair. macOS RGBA16
+varies from 0.446–1.261x, and RGBA8-photo encoding is near parity at 0.998x;
+its timing variation limits conclusions about those cases.
+
+The full run also has losses. On the Windows x64 Xeon Platinum 8573C,
+RGB-native decode measures 0.980x and Gray8-native decode 0.967x, with every
+pair slower. Linux ARM palette-to-RGB decode is 0.983x, with every pair
+slower. Windows ARM RGB-graphics encoding is 0.997x, with all seven pairs
+0.992–0.999x. Across platforms, decoder geometric means range 0.994–1.014x.
+
+The [focused repeat](https://github.com/bojosos/ptpng/actions/runs/38703309747)
+uses nine half-second pairs for RGB photo, Gray8 photo and palette graphics.
+On Windows x64 EPYC 7763, Gray8 decode remains slower at 0.975x, with every
+pair between 0.957–0.984x. Palette-graphics encoding is 0.926x, with every
+pair between 0.858–0.950x. Linux ARM palette-to-RGB decode returns to 1.002x;
+that earlier loss is not reproduced. These results rule out applying the
+combination universally.
+
+The retained source `7b6fdc3` keeps MSVC x64's original row selection and
+two-candidate short search. Other targets use buffer rotation and one short
+candidate. Local MSVC validation confirms that all 2,108 raw streams and
+eleven complete PNGs match the original two-candidate baseline byte-for-byte.
+The decoder sources retain their original implementation on every target.
+
+The [guarded confirmation](https://github.com/bojosos/ptpng/actions/runs/38704163237)
+compares `7b6fdc3` with `56bed94`, again using seven half-second pairs.
+The four optimized targets measure:
+
+| Platform | Gray8 photo encode | RGBA16 photo encode | Noise encode | Nine-image encode geometric mean |
+| --- | ---: | ---: | ---: | ---: |
+| Linux x64 | 1.126x | 1.144x | 1.082x | 1.047x |
+| Linux ARM64 | 1.130x | 1.174x | 1.156x | 1.062x |
+| macOS ARM64 | 1.129x | 1.138x | 1.070x | 1.056x |
+| Windows ARM64 | 1.119x | 1.155x | 1.065x | 1.043x |
+
+Some small losses remain: Windows ARM64 RGBA16-graphics encoding is 0.995x,
+with every pair between 0.992–1.000x and below parity before rounding.
+The four optimized decoder means are 0.999–1.005x. MSVC x64 is a control
+with its baseline code path, measuring 1.008x encoder and 0.993x decoder
+means. Its Gray8 decode is 1.017x with a 0.932–1.071x pair range, and
+palette-graphics encoding is 0.965x with a 0.942–1.059x range. The earlier
+every-pair losses are not reproduced, but the control still shows timing
+variation. No new MSVC x64 speedup is claimed.
+
+All 805 guarded pairs have matching input and decoded sizes. Encoder sizes
+are consistent across repetitions and within each of the two default paths.
+MSVC x64 matches all baseline sizes; the other four platforms agree with the
+one-candidate sizes below.
+
+Relative to the two-candidate baseline, the Gray8 PNG shrinks by 314 bytes,
+RGB grows by 486 bytes, RGBA16 grows by 9,864 bytes and RGBA8 grows by 91,750
+bytes on the optimized targets. RGBA8's 0.779% is the largest relative growth;
+the other five fixtures retain their sizes. MSVC x64 retains its baseline
+sizes, so encoded bytes now differ between these default build paths.
+Independent zlib decoding verifies identical filtered pixels for all eleven
+benchmark PNG inputs, including interlaced sources.
+All nine fixtures remain within 2.1% of the previous nightly's zlib-ng
+level-6 sizes. That fixture bound does not constrain arbitrary images.
+
+All 805 unguarded timing pairs retain matching input and decoded sizes, and
+all 315 encoder sizes in that run agree across platforms. The one-candidate
+build passes nine local CTest checks, including libpng parity and 1,660 raw
+streams independently decoded with zlib. All eight jobs in the combined
+[CI run](https://github.com/bojosos/ptpng/actions/runs/38702424522) pass.
+The combined [fuzz run](https://github.com/bojosos/ptpng/actions/runs/38702428184)
+passes 1,832,608 executions across four targets on x64/ARM64, 60 seconds per
+target, without a reported sanitizer finding. It exercises the Linux paths
+retained by the MSVC guard. All eight jobs in the guarded build's
+[CI run](https://github.com/bojosos/ptpng/actions/runs/38704168748) also pass.
+These bounded checks and
+synthetic fixtures do not establish performance or correctness on every input.
+
+The stored-block lower bound remains a possible follow-up if a cheap
+frequency check can avoid evaluating it on photo blocks where it fails.
+Its exact version skips tree construction for 63 of 96 noise blocks and
+passes 4,000 checks against actual Huffman costs. Repeated random patterns
+and mixed binary/noise inputs remain necessary quality checks before any
+heuristic early stored-block decision.
+
 ## 15 October follow-up
 
 The [14 October nightly](https://github.com/bojosos/ptpng/actions/runs/38534614560)
@@ -80,8 +217,7 @@ photo-encoder gains; other workloads have smaller changes or losses.
 
 All 805 pairs have matching input and decoded sizes, and all 315 candidate
 encoder-size observations agree across platforms. Gray8 output shrinks by 108
-bytes,
-RGB grows by 548 bytes, RGBA8 grows by 36,866 bytes and RGBA16 grows by 8,006
+bytes, RGB grows by 548 bytes, RGBA8 grows by 36,866 bytes and RGBA16 grows by 8,006
 bytes. The largest relative growth is RGBA8's 0.314%; the three graphics
 fixtures, Gray16 photo and noise retain their sizes. All nine remain at most
 2.055% larger than the nightly's zlib-ng level-6 reference. That bound applies
