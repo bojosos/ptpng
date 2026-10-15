@@ -718,6 +718,28 @@ static int deflate_stored_block(deflate_writer *w, const uint8_t *src,
     return 1;
 }
 
+/* Kraft's inequality gives an integer-code lower bound without a tree:
+ * sum(f*b) >= sum(min_b(f*b + lambda/2^b)) - lambda. Round each term down
+ * so the bound stays conservative. The multiplier favors eight-bit codes
+ * for nearly uniform byte literals, where stored blocks are useful. */
+static uint64_t deflate_literal_lower_bound(const uint32_t lit_freq[286],
+                                            unsigned token_count)
+{
+    unsigned lambda = 3u << (deflate_log2(token_count + 1) - 1);
+    unsigned top = deflate_log2(lambda), i;
+    uint64_t bound = 0;
+    for (i = 0; i < 286; ++i) {
+        unsigned freq = lit_freq[i], bits;
+        if (!freq) continue;
+        bits = top - deflate_log2(freq);
+        if (bits && (freq << bits) > lambda) --bits;
+        if (bits < 1) bits = 1;
+        if (bits > 15) bits = 15;
+        bound += (uint64_t)freq * bits + (lambda >> bits);
+    }
+    return bound > lambda ? bound - lambda : 0;
+}
+
 static int deflate_compress(deflate_writer *w, deflate_state *state,
                             const uint8_t *src, size_t size)
 {
@@ -756,6 +778,17 @@ static int deflate_compress(deflate_writer *w, deflate_state *state,
         stored_blocks = (block_size + 65534) / 65535;
         stored_bits = (uint64_t)block_size * 8 + (stored_blocks - 1) * 40 +
                       3 + ((8 - ((w->count + 3) & 7)) & 7) + 32;
+        if (count >= 8192 && stored_bits <= fixed_bits) {
+            uint64_t lower_bits = deflate_literal_lower_bound(lit_freq, count);
+            /* Dynamic blocks need at least 29 header bits and one distance
+             * code bit per match. The exact extra-bit count is known. */
+            lower_bits += 29 + extra_bits;
+            for (i = 0; i < 30; ++i) lower_bits += dist_freq[i];
+            if (stored_bits <= lower_bits) {
+                if (!deflate_stored_block(w, src + start, block_size, final)) return 0;
+                continue;
+            }
+        }
         deflate_make_tree(&tree, lit_freq, dist_freq, extra_bits);
         if (stored_bits <= fixed_bits && stored_bits <= tree.bits) {
             if (!deflate_stored_block(w, src + start, block_size, final)) return 0;
