@@ -34,26 +34,29 @@ uint64_t ptpng_encode_score_scalar(const uint8_t *src, size_t count)
 }
 
 /* Score every residual, including details outside the former sample ranges.
- * Reuse one scratch row and retain each improving candidate in the output. */
+ * Alternate output and scratch on improvement so each row needs at most one copy. */
 static int choose_filter(uint8_t *dst, uint8_t *scratch, const uint8_t *src,
                          const uint8_t *prev, size_t count, unsigned bpp,
                          ptpng_encode_filter_fn forward, ptpng_encode_score_fn score)
 {
+    uint8_t *candidate_row = scratch;
+    const uint8_t *best_row = src;
     uint64_t best_score = score(src, count);
     int best = 0, f;
-    memcpy(dst, src, count);
     for (f = 1; f < 5 && best_score; ++f) {
         uint64_t candidate;
         /* On the first row Up duplicates None and Paeth duplicates Sub. */
         if (!prev && (f == 2 || f == 4)) continue;
-        forward(scratch, src, prev, count, bpp, f);
-        candidate = score(scratch, count);
+        forward(candidate_row, src, prev, count, bpp, f);
+        candidate = score(candidate_row, count);
         if (candidate < best_score) {
             best = f;
             best_score = candidate;
-            memcpy(dst, scratch, count);
+            best_row = candidate_row;
+            candidate_row = candidate_row == scratch ? dst : scratch;
         }
     }
+    if (best_row != dst) memcpy(dst, best_row, count);
     return best;
 }
 
