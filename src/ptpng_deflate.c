@@ -502,7 +502,8 @@ static void deflate_huffman(const uint32_t *freq, unsigned alphabet,
     uint32_t weights[572] = {0};
     uint16_t parents[572], heap[286], order[286];
     unsigned counts[16] = {0}, next_code[16];
-    unsigned used = 0, heap_count = 0, next = alphabet, i, bits, slots = 0;
+    unsigned used = 0, heap_count = 0, next = alphabet, ordered = 0;
+    unsigned i, bits, slots = 0;
     memset(parents, 255, sizeof(parents));
     memset(lengths, 0, alphabet * sizeof(*lengths));
     memset(codes, 0, alphabet * sizeof(*codes));
@@ -523,6 +524,10 @@ static void deflate_huffman(const uint32_t *freq, unsigned alphabet,
     while (heap_count > 1) {
         unsigned a = deflate_heap_pop(heap, &heap_count, weights);
         unsigned b = deflate_heap_pop(heap, &heap_count, weights);
+        /* Heap pops already order the leaves by weight and symbol. Retain
+         * that order for assigning code lengths instead of sorting again. */
+        if (a < alphabet) order[ordered++] = (uint16_t)a;
+        if (b < alphabet) order[ordered++] = (uint16_t)b;
         parents[a] = parents[b] = (uint16_t)next;
         weights[next] = weights[a] + weights[b];
         deflate_heap_push(heap, &heap_count, next++, weights);
@@ -545,14 +550,6 @@ static void deflate_huffman(const uint32_t *freq, unsigned alphabet,
         counts[bits + 1] += 2;
         --counts[max_bits];
         --slots;
-    }
-    for (i = 1; i < used; ++i) {
-        unsigned j = i, symbol = order[i];
-        while (j && deflate_heap_less(symbol, order[j - 1], weights)) {
-            order[j] = order[j - 1];
-            --j;
-        }
-        order[j] = (uint16_t)symbol;
     }
     next = 0;
     for (bits = max_bits; bits; --bits) {
