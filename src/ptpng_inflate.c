@@ -6,7 +6,7 @@
  *    built with pre-reversed codes so one lookup is a single masked peek
  *    tbl[bitbuf & (TBL-1)].  Word refill keeps 48..64 bits available via
  *    whole-byte absorption (OR of overlapping bits is idempotent).
- *  - Flat root tables (litlen 10 bits, dist 8 bits, codelen 7 bits) with
+ *  - Flat root tables (litlen 11 bits, dist 8 bits, codelen 7 bits) with
  *    subtable arenas for codes longer than the root; entries precompute
  *    length/distance bases and extra-bit counts so decoding is
  *    load/shift/add with no symbol post-processing.
@@ -21,7 +21,7 @@
  */
 #include "ptpng_internal.h"
 
-#define LITLEN_ROOT   10
+#define LITLEN_ROOT   11
 #define LITLEN_SIZE   (1u << LITLEN_ROOT)
 #define LITLEN_ARENA  2048
 #define DIST_ROOT     8
