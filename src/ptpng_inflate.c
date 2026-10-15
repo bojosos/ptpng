@@ -10,7 +10,7 @@
  *    subtable arenas for codes longer than the root; entries precompute
  *    length/distance bases and extra-bit counts so decoding is
  *    load/shift/add with no symbol post-processing.
- *  - Four-literal fast path: up to four literals decoded per refill with one
+ *  - Six-literal fast path: up to six literals decoded per refill with one
  *    bounds check; matches/EOB/subtables take the generic path.
  *  - Match copy: 8x64-bit move blocks when dist >= 64, 4x64-bit when
  *    dist >= 32 (32-byte blocks are overlap-safe exactly then), and
@@ -418,7 +418,7 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
 
             REFILL();
             if (pos + 8 <= out_len) {
-                /* Up to four root-table literals share one refill. */
+                /* Up to six root-table literals share one refill. */
                 /* build_table gives valid literals a nonzero bit count, so
                  * their entries exceed F_LIT. Reserved symbols are exactly
                  * F_LIT; matches, EOB and subtable entries are below it. */
@@ -446,7 +446,19 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                                 bitcnt >= (int)nb) {
                                 out[pos++] = (uint8_t)(e >> 8);
                                 DROP(nb);
-                                continue;
+                                e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
+                                nb = e & 0xF;
+                                if (e > F_LIT && bitcnt >= (int)nb) {
+                                    out[pos++] = (uint8_t)(e >> 8);
+                                    DROP(nb);
+                                    e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
+                                    nb = e & 0xF;
+                                    if (e > F_LIT && bitcnt >= (int)nb) {
+                                        out[pos++] = (uint8_t)(e >> 8);
+                                        DROP(nb);
+                                        continue;
+                                    }
+                                }
                             }
                         }
                         /* A following match can need more bits than remain.
