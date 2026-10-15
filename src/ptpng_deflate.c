@@ -124,6 +124,9 @@ typedef struct {
     /* A single-candidate search only reads the predecessor of the most
      * recent insertion. Interior match positions need no predecessor ring. */
     uint32_t short_link;
+    /* Keep the token-array offset a multiple of 16 after shrinking the
+     * predecessor ring. The padding has no matching state. */
+    uint32_t short_padding[3];
 #endif
     deflate_token tokens[DEFLATE_TOKENS];
 } deflate_state;
