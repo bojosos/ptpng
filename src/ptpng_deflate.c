@@ -268,7 +268,9 @@ static unsigned deflate_match(const deflate_state *state, const uint8_t *src,
             matches = candidate_low == prefix_low && candidate_high == prefix_high;
         }
         if (matches) {
-            length = 6;
+            /* With a best match up to nine bytes, the six-byte prefix and
+             * four-byte tail together prove every byte through best. */
+            length = best <= 9 ? best + 1 : 6;
             while (limit - length >= 8) {
                 uint64_t a, b;
                 memcpy(&a, src + ref + length, sizeof(a));
