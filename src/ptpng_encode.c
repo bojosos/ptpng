@@ -33,6 +33,29 @@ uint64_t ptpng_encode_score_scalar(const uint8_t *src, size_t count)
     return score;
 }
 
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64)
+/* Paired MSVC x64 measurements favor the existing encoder layout. */
+static int choose_filter(uint8_t *dst, uint8_t *scratch, const uint8_t *src,
+                         const uint8_t *prev, size_t count, unsigned bpp,
+                         ptpng_encode_filter_fn forward, ptpng_encode_score_fn score)
+{
+    uint64_t best_score = score(src, count);
+    int best = 0, f;
+    memcpy(dst, src, count);
+    for (f = 1; f < 5 && best_score; ++f) {
+        uint64_t candidate;
+        if (!prev && (f == 2 || f == 4)) continue;
+        forward(scratch, src, prev, count, bpp, f);
+        candidate = score(scratch, count);
+        if (candidate < best_score) {
+            best = f;
+            best_score = candidate;
+            memcpy(dst, scratch, count);
+        }
+    }
+    return best;
+}
+#else
 /* Score every residual, including details outside the former sample ranges.
  * Alternate output and scratch on improvement so each row needs at most one copy. */
 static int choose_filter(uint8_t *dst, uint8_t *scratch, const uint8_t *src,
@@ -59,6 +82,7 @@ static int choose_filter(uint8_t *dst, uint8_t *scratch, const uint8_t *src,
     if (best_row != dst) memcpy(dst, best_row, count);
     return best;
 }
+#endif
 
 static void put32(uint8_t *p, uint32_t n)
 {

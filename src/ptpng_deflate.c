@@ -103,7 +103,12 @@ PTPNG_API_INLINE unsigned deflate_log2(unsigned value)
 #define DEFLATE_CHAIN 64
 #endif
 #ifndef DEFLATE_SHORT_CHAIN
+/* Retain MSVC x64's measured baseline after paired decoder/graphics losses. */
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64)
+#define DEFLATE_SHORT_CHAIN 2
+#else
 #define DEFLATE_SHORT_CHAIN 1
+#endif
 #endif
 
 typedef struct { uint16_t value, distance; } deflate_token;
