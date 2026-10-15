@@ -65,9 +65,13 @@ PTPNG_API_INLINE void ptpng_store64le(void *p, uint64_t v)
 
 PTPNG_API_INLINE uint32_t rev_bits(uint32_t v, unsigned n)
 {
-    uint32_t r = 0;
-    do { r = (r << 1) | (v & 1); v >>= 1; } while (--n);
-    return r;
+    /* DEFLATE codes use at most fifteen bits. Reverse the low sixteen
+     * together instead of repeating a dependent loop for each code bit. */
+    v = ((v & 0x5555u) << 1) | ((v >> 1) & 0x5555u);
+    v = ((v & 0x3333u) << 2) | ((v >> 2) & 0x3333u);
+    v = ((v & 0x0f0fu) << 4) | ((v >> 4) & 0x0f0fu);
+    v = ((v & 0x00ffu) << 8) | (v >> 8);
+    return v >> (16 - n);
 }
 
 /* scratch shared by builds (single-threaded by contract) */
