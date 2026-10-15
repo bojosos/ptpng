@@ -368,6 +368,9 @@ static unsigned deflate_short_match(const deflate_state *state, const uint8_t *s
                     distance_best = distance;
                     best_saving = literal_cost - cost;
                 }
+                /* Later candidates are farther away and cannot have a
+                 * lower distance cost. No short match beats five bytes. */
+                if (length == 5) break;
             }
         }
         previous_distance = distance;
@@ -422,7 +425,7 @@ static size_t deflate_parse(deflate_state *state, const uint8_t *src,
             inserted_next = 1;
             next_length = deflate_match(state, src, pos + 1, end, link, length,
                                         &next_distance);
-            if (!next_length)
+            if (!next_length && length < 5)
                 next_length = deflate_short_match(state, src, pos + 1, end, length,
                                                   literal_bits, &next_distance);
             if (next_length > length) {
