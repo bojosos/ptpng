@@ -77,9 +77,15 @@ static void fill_input(uint8_t *src, size_t size, unsigned mode)
             src[i] = i >= 32768 ? src[i - 32768] : (uint8_t)random_word();
             break;
         case 6: src[i] = (uint8_t)((i / 1000) % 3); break;
-        default:
+        case 7:
             src[i] = i >= 31 && random_word() % 3 ?
                      src[i - 31] : (uint8_t)random_word();
+            break;
+        default:
+            /* Nearby three- and five-byte repeats among otherwise random
+             * bytes exercise short matches without long matching runs. */
+            src[i] = i % 16 >= 8 && i % 16 < (mode == 8 ? 11u : 13u) ?
+                     src[i - 8] : (uint8_t)random_word();
             break;
         }
     }
@@ -172,7 +178,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "overflow must fail before reading input and clear output\n");
         return 1;
     }
-    for (mode = 0; mode < 8; ++mode) {
+    for (mode = 0; mode < 10; ++mode) {
         for (i = 0; i <= 33; ++i) {
             if (check_stream(i, mode)) return 1;
             ++count;
@@ -184,7 +190,7 @@ int main(int argc, char **argv)
     }
     for (i = 0; i < iterations; ++i) {
         size_t size = random_word() % 131073;
-        if (check_stream(size, (unsigned)(i % 8))) return 1;
+        if (check_stream(size, (unsigned)(i % 10))) return 1;
         ++count;
     }
     printf("deflate: %u streams passed", count);
