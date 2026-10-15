@@ -4,6 +4,113 @@ ptpng targets fast single-threaded PNG decoding on x86 AVX2 and ARM64
 NEON. A kernel benchmark measures one operation; it does not establish
 the speed of a complete PNG decode or a lead over every other decoder.
 
+## 15 October follow-up
+
+The [14 October nightly](https://github.com/bojosos/ptpng/actions/runs/38534614560)
+tests merged `4640b81`. All five platform jobs passed. Its geometric mean
+speedups against libpng + zlib-ng are:
+
+| Platform | Decode speedup | Encode speedup vs level 6 |
+| --- | ---: | ---: |
+| Linux x64 | 1.847x | 1.644x |
+| Windows x64 | 1.713x | 1.639x |
+| Linux ARM64 | 1.570x | 1.183x |
+| macOS ARM64 | 1.649x | 1.252x |
+| Windows ARM64 | 1.470x | 1.350x |
+
+All 135 decoder comparisons beat the reference in this run. The narrowest
+margins remain Windows noise decoding, at 1.034x on x64 and 1.025x on ARM64.
+These are within-run reference comparisons; runner changes prevent attributing
+raw timing differences from the previous nightly to code changes.
+
+Gray8 and RGBA16 photo encoding still lose on every platform. Gray8 runs at
+0.754–0.917x the reference throughput but produces 6.7% smaller files.
+RGBA16 runs at 0.612–0.875x and produces 0.8% larger files. Noise encoding
+also trails the reference on Linux ARM64 and macOS, at 0.919x and 0.766x.
+These remain useful targets after the earlier RGB-photo improvements.
+
+Exploratory local VTune software profiles attribute 37.6% of Gray8 encoder
+CPU samples and 38.8% of RGBA16 samples to `deflate_short_match`. The profiles
+include setup and warm-up. They identify sampled function costs, not isolated
+stage durations. Early local timing experiments ran with the laptop unplugged;
+their speed ratios are excluded from the retained measurements.
+
+### Short-match search budget
+
+The candidate caps three-to-five-byte match searches at two candidates instead
+of four. Long matching retains its 64-candidate cap, and filter scoring and
+block-cost selection retain their existing behavior. `DEFLATE_SHORT_CHAIN=4`
+can restore the previous short-search budget at build time. This changes some
+match choices and encoded bytes while preserving decoded pixels.
+
+After connecting AC power, seven alternating half-second pairs on the local
+i7-1355U, pinned to logical CPU 2, measure 1.221x Gray8-photo encoding,
+1.117x RGBA16-photo encoding and 1.089x RGBA8-photo encoding. Every pair
+improves in those three cases. The nine-image encoder geometric mean is
+1.058x; RGB-photo encoding is 1.002x. The fourteen decoder controls average
+1.001x, with individual conversion pairs still varying broadly. Local
+noise-to-RGB decode has a 0.960x median and 0.916–1.092x pair range.
+
+The [five-platform comparison](https://github.com/bojosos/ptpng/actions/runs/38699602784)
+tests `2c3c676` against merged `4640b81`. Each of 23 workloads has seven
+alternating pairs with at least 0.5 seconds per timed loop. Linux and Windows
+pin both versions to one logical CPU; macOS is OS scheduled. Median
+candidate/baseline throughput ratios are:
+
+| Platform | Gray8 photo encode | RGBA16 photo encode | RGBA8 photo encode | Nine-image encode geometric mean |
+| --- | ---: | ---: | ---: | ---: |
+| Linux x64 | 1.338x | 1.126x | 1.104x | 1.059x |
+| Windows x64 | 1.265x | 1.123x | 1.088x | 1.052x |
+| Linux ARM64 | 1.241x | 1.102x | 1.078x | 1.048x |
+| macOS ARM64 | 1.274x | 1.243x | 1.083x | 1.080x |
+| Windows ARM64 | 1.211x | 1.075x | 1.078x | 1.042x |
+
+Every pair improves in these three photo cases on Linux and Windows. macOS
+has wider variation, with Gray8 pairs ranging 0.834–1.414x and RGBA16 pairs
+0.887–1.307x. Its RGBA8 pairs also include a loss. These macOS medians are
+less precise than the pinned-platform results.
+
+There are small losses elsewhere. Linux ARM64 palette-graphics encoding is
+0.996x, with all seven pairs between 0.994–1.000x and below parity before
+rounding. Windows x64's RGB native decode and RGB-graphics-to-RGBA decode
+measure 0.954x and 0.965x, with ranges of 0.779–1.033x and 0.948–1.126x.
+Those broad decoder ranges include improvements; the decoder geometric means
+across platforms range 0.994–1.006x. These measurements support the targeted
+photo-encoder gains; other workloads have smaller changes or losses.
+
+All 805 pairs have matching input and decoded sizes, and all 315 candidate
+encoder-size observations agree across platforms. Gray8 output shrinks by 108
+bytes,
+RGB grows by 548 bytes, RGBA8 grows by 36,866 bytes and RGBA16 grows by 8,006
+bytes. The largest relative growth is RGBA8's 0.314%; the three graphics
+fixtures, Gray16 photo and noise retain their sizes. All nine remain at most
+2.055% larger than the nightly's zlib-ng level-6 reference. That bound applies
+to these synthetic fixtures, not arbitrary images.
+
+Local validation passes all nine CTest tests, including libpng parity and
+independent zlib checks. Raw compression tests now include nearby three- and
+five-byte repeats among random bytes, with short inputs, window wraps and
+block boundaries. All 1,660 streams pass both decoders. Additional differential
+checks verify 2,108 raw streams with independent zlib and eleven complete PNG
+fixtures with identical decompressed IDAT bytes. Those raw samples retain
+identical compressed bytes; the photo PNG changes above are intentional.
+
+All eight jobs in [CI run 38699606928](https://github.com/bojosos/ptpng/actions/runs/38699606928)
+pass, including the six native compiler/platform jobs and Linux ASan/UBSan.
+[Fuzz run 38699610855](https://github.com/bojosos/ptpng/actions/runs/38699610855)
+completes 1,756,089 executions across decode, inflate, PNG encode and raw
+DEFLATE on x64/ARM64, 60 seconds per target, without a reported sanitizer
+finding. These remain bounded checks on synthetic and generated inputs.
+
+Cost hoisting, explicit short-match byte checks, search pruning, forced
+inlining and tagged short links remain experimental. Their early unplugged
+timings do not establish a gain, and tagged links add 384 KiB of per-call
+state. They are excluded from this change. Further work should profile
+current ARM noise encoding before trying an early stored-block decision;
+mixed compressible/noisy inputs need size checks before such a decision can
+replace matching. Real application images also need validation before
+generalizing the short-search tradeoff beyond these fixtures.
+
 ## 14 October follow-up
 
 The [forced nightly](https://github.com/bojosos/ptpng/actions/runs/38465890719)

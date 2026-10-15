@@ -165,6 +165,13 @@ loading improves 13.8–18.1% in hosted paired measurements. Some cases
 remain slower. A separate Clang/PGO experiment helps average saving but
 does not justify changing the default Windows compiler.
 
+The [15 October follow-up](PERFORMANCE.md#15-october-follow-up) improves
+Gray8-photo encoding throughput by 21–34% and RGBA16-photo encoding by
+7.5–24% in same-machine comparisons across all five platforms. Its smaller
+short-match search budget grows affected files by at most 0.314%; graphics
+and noise sizes stay unchanged. macOS timings vary more, and some other
+workloads retain small losses.
+
 See [per-image times and file sizes](PERFORMANCE.md#30-september-benchmark-snapshot)
 or the [live dashboard](https://bojosos.github.io/ptpng/bench/) for all
 platforms, output formats and reference levels. The dashboard keeps full
