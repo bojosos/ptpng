@@ -22,10 +22,11 @@ uint64_t ptpng_encode_score_neon(const uint8_t *src, size_t count)
     return score;
 }
 
-static void encode_tail_neon(uint8_t *dst, const uint8_t *src,
+PTPNG_API_INLINE uint64_t encode_tail_neon(uint8_t *dst, const uint8_t *src,
                              const uint8_t *prev, size_t begin, size_t end,
-                             unsigned bpp, int filter)
+                             unsigned bpp, int filter, int scoring)
 {
+    uint64_t score = 0;
     size_t i;
     for (i = begin; i < end; ++i) {
         unsigned a = i >= bpp ? src[i - bpp] : 0;
@@ -43,7 +44,12 @@ static void encode_tail_neon(uint8_t *dst, const uint8_t *src,
                                    threshold <= lo ? hi : c);
         }
         dst[i] = (uint8_t)(src[i] - predictor);
+        if (scoring) {
+            unsigned x = dst[i];
+            score += x < 128 ? x : 256-x;
+        }
     }
+    return score;
 }
 
 PTPNG_API_INLINE uint16x8_t encode_paeth8_neon(uint16x8_t au, uint16x8_t bu,
@@ -59,11 +65,13 @@ PTPNG_API_INLINE uint16x8_t encode_paeth8_neon(uint16x8_t au, uint16x8_t bu,
     return vreinterpretq_u16_s16(vbslq_s16(vcgtq_s16(hi, threshold), predictor, lo));
 }
 
-void ptpng_encode_filter_neon(uint8_t *dst, const uint8_t *src,
+PTPNG_API_INLINE uint64_t encode_filter_neon(uint8_t *dst, const uint8_t *src,
                               const uint8_t *prev, size_t count,
-                              unsigned bpp, int filter)
+                              unsigned bpp, int filter, int scoring)
 {
     size_t i = 0;
+    uint64_t score = 0;
+    uint64x2_t sum = vdupq_n_u64(0);
     const uint8x16_t zero = vdupq_n_u8(0);
     if (!prev) {
         if (filter == 2) filter = 0;
@@ -71,25 +79,31 @@ void ptpng_encode_filter_neon(uint8_t *dst, const uint8_t *src,
     }
     if (filter == 0) {
         if (count) memcpy(dst, src, count);
-        return;
+        return scoring ? ptpng_encode_score_neon(src, count) : 0;
     }
     if (filter != 2) {
         i = count < bpp ? count : bpp;
-        encode_tail_neon(dst, src, prev, 0, i, bpp, filter);
+        score = encode_tail_neon(dst, src, prev, 0, i, bpp, filter, scoring);
     }
     switch (filter) {
     case 1:
         for (; count - i >= 16; i += 16) {
             uint8x16_t s = vld1q_u8(src + i);
             uint8x16_t a = vld1q_u8(src + i - bpp);
-            vst1q_u8(dst + i, vsubq_u8(s, a));
+            uint8x16_t residual = vsubq_u8(s, a);
+            vst1q_u8(dst + i, residual);
+            if (scoring) sum = vaddq_u64(sum, vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(
+                vreinterpretq_u8_s8(vabsq_s8(vreinterpretq_s8_u8(residual)))))));
         }
         break;
     case 2:
         for (; count - i >= 16; i += 16) {
             uint8x16_t s = vld1q_u8(src + i);
             uint8x16_t b = vld1q_u8(prev + i);
-            vst1q_u8(dst + i, vsubq_u8(s, b));
+            uint8x16_t residual = vsubq_u8(s, b);
+            vst1q_u8(dst + i, residual);
+            if (scoring) sum = vaddq_u64(sum, vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(
+                vreinterpretq_u8_s8(vabsq_s8(vreinterpretq_s8_u8(residual)))))));
         }
         break;
     case 3:
@@ -97,7 +111,10 @@ void ptpng_encode_filter_neon(uint8_t *dst, const uint8_t *src,
             uint8x16_t s = vld1q_u8(src + i);
             uint8x16_t a = vld1q_u8(src + i - bpp);
             uint8x16_t b = prev ? vld1q_u8(prev + i) : zero;
-            vst1q_u8(dst + i, vsubq_u8(s, vhaddq_u8(a, b)));
+            uint8x16_t residual = vsubq_u8(s, vhaddq_u8(a, b));
+            vst1q_u8(dst + i, residual);
+            if (scoring) sum = vaddq_u64(sum, vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(
+                vreinterpretq_u8_s8(vabsq_s8(vreinterpretq_s8_u8(residual)))))));
         }
         break;
     case 4:
@@ -111,11 +128,30 @@ void ptpng_encode_filter_neon(uint8_t *dst, const uint8_t *src,
             uint16x8_t hi = encode_paeth8_neon(vmovl_u8(vget_high_u8(a)),
                 vmovl_u8(vget_high_u8(b)), vmovl_u8(vget_high_u8(c)));
             uint8x16_t predictor = vcombine_u8(vmovn_u16(lo), vmovn_u16(hi));
-            vst1q_u8(dst + i, vsubq_u8(s, predictor));
+            uint8x16_t residual = vsubq_u8(s, predictor);
+            vst1q_u8(dst + i, residual);
+            if (scoring) sum = vaddq_u64(sum, vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(
+                vreinterpretq_u8_s8(vabsq_s8(vreinterpretq_s8_u8(residual)))))));
         }
         break;
     }
-    encode_tail_neon(dst, src, prev, i, count, bpp, filter);
+    score += encode_tail_neon(dst, src, prev, i, count, bpp, filter, scoring);
+    if (scoring) score += vgetq_lane_u64(sum, 0) + vgetq_lane_u64(sum, 1);
+    return score;
+}
+
+void ptpng_encode_filter_neon(uint8_t *dst, const uint8_t *src,
+                              const uint8_t *prev, size_t count,
+                              unsigned bpp, int filter)
+{
+    (void)encode_filter_neon(dst, src, prev, count, bpp, filter, 0);
+}
+
+uint64_t ptpng_encode_filter_score_neon(uint8_t *dst, const uint8_t *src,
+                                       const uint8_t *prev, size_t count,
+                                       unsigned bpp, int filter)
+{
+    return encode_filter_neon(dst, src, prev, count, bpp, filter, 1);
 }
 
 #endif

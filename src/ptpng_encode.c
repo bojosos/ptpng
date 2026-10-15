@@ -8,9 +8,10 @@ static unsigned paeth(unsigned a, unsigned b, unsigned c)
     return da <= db && da <= dc ? a : db <= dc ? b : c;
 }
 
-void ptpng_encode_filter_scalar(uint8_t *dst, const uint8_t *src,
-    const uint8_t *prev, size_t count, unsigned bpp, int filter)
+PTPNG_API_INLINE uint64_t encode_filter_scalar(uint8_t *dst, const uint8_t *src,
+    const uint8_t *prev, size_t count, unsigned bpp, int filter, int scoring)
 {
+    uint64_t score = 0;
     size_t i;
     for (i = 0; i < count; ++i) {
         unsigned a = i >= bpp ? src[i-bpp] : 0;
@@ -19,7 +20,24 @@ void ptpng_encode_filter_scalar(uint8_t *dst, const uint8_t *src,
         unsigned predictor = filter == 1 ? a : filter == 2 ? b :
             filter == 3 ? (a+b)/2 : filter == 4 ? paeth(a,b,c) : 0;
         dst[i] = (uint8_t)(src[i] - predictor);
+        if (scoring) {
+            unsigned x = dst[i];
+            score += x < 128 ? x : 256-x;
+        }
     }
+    return score;
+}
+
+void ptpng_encode_filter_scalar(uint8_t *dst, const uint8_t *src,
+    const uint8_t *prev, size_t count, unsigned bpp, int filter)
+{
+    (void)encode_filter_scalar(dst, src, prev, count, bpp, filter, 0);
+}
+
+uint64_t ptpng_encode_filter_score_scalar(uint8_t *dst, const uint8_t *src,
+    const uint8_t *prev, size_t count, unsigned bpp, int filter)
+{
+    return encode_filter_scalar(dst, src, prev, count, bpp, filter, 1);
 }
 
 uint64_t ptpng_encode_score_scalar(const uint8_t *src, size_t count)
@@ -37,7 +55,7 @@ uint64_t ptpng_encode_score_scalar(const uint8_t *src, size_t count)
  * Reuse one scratch row and retain each improving candidate in the output. */
 static int choose_filter(uint8_t *dst, uint8_t *scratch, const uint8_t *src,
                          const uint8_t *prev, size_t count, unsigned bpp,
-                         ptpng_encode_filter_fn forward, ptpng_encode_score_fn score)
+                         ptpng_encode_filter_score_fn forward_score, ptpng_encode_score_fn score)
 {
     uint64_t best_score = score(src, count);
     int best = 0, f;
@@ -46,8 +64,7 @@ static int choose_filter(uint8_t *dst, uint8_t *scratch, const uint8_t *src,
         uint64_t candidate;
         /* On the first row Up duplicates None and Paeth duplicates Sub. */
         if (!prev && (f == 2 || f == 4)) continue;
-        forward(scratch, src, prev, count, bpp, f);
-        candidate = score(scratch, count);
+        candidate = forward_score(scratch, src, prev, count, bpp, f);
         if (candidate < best_score) {
             best = f;
             best_score = candidate;
@@ -88,6 +105,7 @@ int ptpng_encode(const void *pixels, size_t pixels_size,
     int rc, filter = opts ? opts->filter : PTPNG_ENCODE_FILTER_ADAPTIVE;
     ptpng_encode_filter_fn forward = ptpng_encode_filter_scalar;
     ptpng_encode_score_fn score = ptpng_encode_score_scalar;
+    ptpng_encode_filter_score_fn forward_score = ptpng_encode_filter_score_scalar;
     if (out) *out = NULL;
     if (out_len) *out_len = 0;
     if (!out || !out_len || !pixels || !width || !height ||
@@ -121,18 +139,20 @@ int ptpng_encode(const void *pixels, size_t pixels_size,
     if (ptpng_cpu.avx2) {
         forward = ptpng_encode_filter_avx2;
         score = ptpng_encode_score_avx2;
+        forward_score = ptpng_encode_filter_score_avx2;
     }
 #elif PTPNG_ARM_NEON
     if (ptpng_cpu.neon) {
         forward = ptpng_encode_filter_neon;
         score = ptpng_encode_score_neon;
+        forward_score = ptpng_encode_filter_score_neon;
     }
 #endif
     for (y = 0; y < height; ++y) {
         int selected = filter;
         uint8_t *row = raw+(rowbytes+1)*y;
         if (filter < 0)
-            selected = choose_filter(row+1, scratch, src, prev, rowbytes, bpp, forward, score);
+            selected = choose_filter(row+1, scratch, src, prev, rowbytes, bpp, forward_score, score);
         else if (!selected) memcpy(row+1, src, rowbytes);
         else forward(row+1, src, prev, rowbytes, bpp, selected);
         row[0] = (uint8_t)selected;

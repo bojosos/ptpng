@@ -21,10 +21,11 @@ uint64_t ptpng_encode_score_avx2(const uint8_t *src, size_t count)
     return score;
 }
 
-static void encode_tail_avx2(uint8_t *dst, const uint8_t *src,
+PTPNG_API_INLINE uint64_t encode_tail_avx2(uint8_t *dst, const uint8_t *src,
                              const uint8_t *prev, size_t begin, size_t end,
-                             unsigned bpp, int filter)
+                             unsigned bpp, int filter, int scoring)
 {
+    uint64_t score = 0;
     size_t i;
     for (i = begin; i < end; ++i) {
         unsigned a = i >= bpp ? src[i - bpp] : 0;
@@ -42,7 +43,12 @@ static void encode_tail_avx2(uint8_t *dst, const uint8_t *src,
                                    threshold <= lo ? hi : c);
         }
         dst[i] = (uint8_t)(src[i] - predictor);
+        if (scoring) {
+            unsigned x = dst[i];
+            score += x < 128 ? x : 256-x;
+        }
     }
+    return score;
 }
 
 PTPNG_API_INLINE __m256i encode_paeth16_avx2(__m256i a, __m256i b,
@@ -60,11 +66,13 @@ PTPNG_API_INLINE __m256i encode_paeth16_avx2(__m256i a, __m256i b,
         lo, predictor, _mm256_cmpgt_epi16(hi, threshold));
 }
 
-void ptpng_encode_filter_avx2(uint8_t *dst, const uint8_t *src,
+PTPNG_API_INLINE uint64_t encode_filter_avx2(uint8_t *dst, const uint8_t *src,
                               const uint8_t *prev, size_t count,
-                              unsigned bpp, int filter)
+                              unsigned bpp, int filter, int scoring)
 {
     size_t i = 0;
+    uint64_t score = 0, lanes[4];
+    __m256i sum = _mm256_setzero_si256();
     const __m256i zero = _mm256_setzero_si256();
     if (!prev) {
         if (filter == 2) filter = 0;
@@ -72,25 +80,31 @@ void ptpng_encode_filter_avx2(uint8_t *dst, const uint8_t *src,
     }
     if (filter == 0) {
         if (count) memcpy(dst, src, count);
-        return;
+        return scoring ? ptpng_encode_score_avx2(src, count) : 0;
     }
     if (filter != 2) {
         i = count < bpp ? count : bpp;
-        encode_tail_avx2(dst, src, prev, 0, i, bpp, filter);
+        score = encode_tail_avx2(dst, src, prev, 0, i, bpp, filter, scoring);
     }
     switch (filter) {
     case 1:
         for (; count - i >= 32; i += 32) {
             __m256i s = _mm256_loadu_si256((const __m256i *)(src + i));
             __m256i a = _mm256_loadu_si256((const __m256i *)(src + i - bpp));
-            _mm256_storeu_si256((__m256i *)(dst + i), _mm256_sub_epi8(s, a));
+            __m256i residual = _mm256_sub_epi8(s, a);
+            _mm256_storeu_si256((__m256i *)(dst + i), residual);
+            if (scoring) sum = _mm256_add_epi64(sum,
+                _mm256_sad_epu8(_mm256_abs_epi8(residual), zero));
         }
         break;
     case 2:
         for (; count - i >= 32; i += 32) {
             __m256i s = _mm256_loadu_si256((const __m256i *)(src + i));
             __m256i b = _mm256_loadu_si256((const __m256i *)(prev + i));
-            _mm256_storeu_si256((__m256i *)(dst + i), _mm256_sub_epi8(s, b));
+            __m256i residual = _mm256_sub_epi8(s, b);
+            _mm256_storeu_si256((__m256i *)(dst + i), residual);
+            if (scoring) sum = _mm256_add_epi64(sum,
+                _mm256_sad_epu8(_mm256_abs_epi8(residual), zero));
         }
         break;
     case 3:
@@ -100,7 +114,10 @@ void ptpng_encode_filter_avx2(uint8_t *dst, const uint8_t *src,
             __m256i b = prev ? _mm256_loadu_si256((const __m256i *)(prev + i)) : zero;
             __m256i odd = _mm256_and_si256(_mm256_xor_si256(a, b), _mm256_set1_epi8(1));
             __m256i predictor = _mm256_sub_epi8(_mm256_avg_epu8(a, b), odd);
-            _mm256_storeu_si256((__m256i *)(dst + i), _mm256_sub_epi8(s, predictor));
+            __m256i residual = _mm256_sub_epi8(s, predictor);
+            _mm256_storeu_si256((__m256i *)(dst + i), residual);
+            if (scoring) sum = _mm256_add_epi64(sum,
+                _mm256_sad_epu8(_mm256_abs_epi8(residual), zero));
         }
         break;
     case 4:
@@ -116,9 +133,31 @@ void ptpng_encode_filter_avx2(uint8_t *dst, const uint8_t *src,
                 _mm256_unpackhi_epi8(a, zero), _mm256_unpackhi_epi8(b, zero),
                 _mm256_unpackhi_epi8(c, zero));
             __m256i predictor = _mm256_packus_epi16(lo, hi);
-            _mm256_storeu_si256((__m256i *)(dst + i), _mm256_sub_epi8(s, predictor));
+            __m256i residual = _mm256_sub_epi8(s, predictor);
+            _mm256_storeu_si256((__m256i *)(dst + i), residual);
+            if (scoring) sum = _mm256_add_epi64(sum,
+                _mm256_sad_epu8(_mm256_abs_epi8(residual), zero));
         }
         break;
     }
-    encode_tail_avx2(dst, src, prev, i, count, bpp, filter);
+    score += encode_tail_avx2(dst, src, prev, i, count, bpp, filter, scoring);
+    if (scoring) {
+        _mm256_storeu_si256((__m256i *)lanes, sum);
+        score += lanes[0] + lanes[1] + lanes[2] + lanes[3];
+    }
+    return score;
+}
+
+void ptpng_encode_filter_avx2(uint8_t *dst, const uint8_t *src,
+                              const uint8_t *prev, size_t count,
+                              unsigned bpp, int filter)
+{
+    (void)encode_filter_avx2(dst, src, prev, count, bpp, filter, 0);
+}
+
+uint64_t ptpng_encode_filter_score_avx2(uint8_t *dst, const uint8_t *src,
+                                       const uint8_t *prev, size_t count,
+                                       unsigned bpp, int filter)
+{
+    return encode_filter_avx2(dst, src, prev, count, bpp, filter, 1);
 }
