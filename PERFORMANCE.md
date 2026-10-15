@@ -4,6 +4,66 @@ ptpng targets fast single-threaded PNG decoding on x86 AVX2 and ARM64
 NEON. A kernel benchmark measures one operation; it does not establish
 the speed of a complete PNG decode or a lead over every other decoder.
 
+## 15 October continued investigation
+
+The [refreshed nightly](https://github.com/bojosos/ptpng/actions/runs/38757881206)
+tests merged `90e0c93`. All five platforms pass correctness checks. Its
+within-run geometric mean ratios against libpng with zlib-ng are:
+
+| Platform | Decode speedup, 27 cases | Encode speedup against level 6, nine images |
+| --- | ---: | ---: |
+| Linux x64 | 1.890x | 1.888x |
+| Linux ARM64 | 1.577x | 1.368x |
+| macOS ARM64 | 1.636x | 1.448x |
+| Windows x64 | 1.615x | 1.680x |
+| Windows ARM64 | 1.477x | 1.498x |
+
+133 of 135 decode comparisons beat the reference. Windows x64 noise is
+0.979x in native output and 0.981x in RGBA8; RGB8 is 1.002x. Windows ARM64
+noise remains close at 1.025x. These within-run ratios do not establish a
+code regression against a previous nightly on another virtual machine.
+
+The [new profiles](https://github.com/bojosos/ptpng/actions/runs/38757887735)
+use this same revision and retain their actual PNG inputs. Linux ARM64
+attributes 79.2% of palette-to-RGB self samples to scalar conversion and
+53.8% of RGB-graphics decode to scalar Paeth. RGB-photo encoding still
+attributes about 80% to long matching on both Linux architectures.
+
+### ARM palette conversion
+
+The retained palette converter reads four independent packed colors,
+removes alpha with a NEON byte lookup, and writes exactly twelve bytes.
+Its tail writes exactly three bytes per remaining pixel. It accepts an
+unaligned palette and introduces no source or destination overread.
+Decoded pixels and encoder output remain identical to the baseline.
+
+The [first comparison](https://github.com/bojosos/ptpng/actions/runs/38758143415)
+finds palette-to-RGB median gains of 9.0% on Linux ARM64, 10.8% on Windows
+ARM64 and 16.6% on macOS. However, Linux ARM64 RGBA8 decode loses about 1.1%.
+The [nine-pair repeat](https://github.com/bojosos/ptpng/actions/runs/38759001922)
+reproduces the RGBA8 loss in every pair, despite its unchanged filter body.
+
+The new static kernel had moved GCC's existing Paeth function from
+`0x12cb0` to `0x12d80`. Giving only the new kernel its own GCC text
+subsection restores Paeth to `0x12cb0`, with identical size and bytes.
+The [seven-pair confirmation](https://github.com/bojosos/ptpng/actions/runs/38759942686)
+then measures Linux ARM64 palette conversion at 1.095x, with RGBA8 native
+at 1.000x and RGB8 at 0.999x. Windows ARM64 palette conversion is 1.111x,
+with every pair between 1.092 and 1.127x; its RGBA8 paths are 1.004x and
+1.001x. macOS remains noisier. x64 retains its original implementation.
+
+The complete final-source comparison is
+[38760482803](https://github.com/bojosos/ptpng/actions/runs/38760482803).
+All eight jobs in the final-source
+[CI run](https://github.com/bojosos/ptpng/actions/runs/38760487793) pass.
+Existing conversion tests cover independent expected palette colors,
+short lengths, all alignments and output canaries; platform CI also
+checks independent libpng parity. The original kernel's
+[fuzz run](https://github.com/bojosos/ptpng/actions/runs/38758977459)
+passes 930,135 executions across four targets on x64/ARM64 without a
+reported sanitizer finding. The final source changes only GCC placement
+from that kernel; PR checks exercise the complete final revision again.
+
 ## 15 October parallel experiments
 
 This round starts from `56bed94`, including the two-candidate short matcher
