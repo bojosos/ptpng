@@ -114,6 +114,8 @@ PTPNG_API_INLINE unsigned deflate_log2(unsigned value)
 typedef struct { uint16_t value, distance; } deflate_token;
 typedef struct {
     uint32_t head[1u << DEFLATE_HASH_BITS];
+    /* Each entry packs a 16-bit backward distance and a 16-bit prefix tag.
+     * Predecessors outside the window cannot supply a usable candidate. */
     uint32_t previous[DEFLATE_WINDOW];
     /* The long chain hashes six bytes. A separate, shallow three-byte
      * chain recovers profitable short matches in noisier image residuals. */
@@ -188,7 +190,11 @@ PTPNG_API_INLINE uint32_t deflate_insert(deflate_state *state,
         state->short_previous[pos & (DEFLATE_WINDOW - 1)] = state->short_head[short_hash];
         state->short_head[short_hash] = (uint32_t)pos + 1;
         old = state->head[hash];
-        state->previous[pos & (DEFLATE_WINDOW - 1)] = old;
+        {
+            unsigned delta = (uint32_t)pos - (old - 1);
+            state->previous[pos & (DEFLATE_WINDOW - 1)] =
+                ((uint32_t)word << 16) | (old && delta <= DEFLATE_WINDOW ? delta : 0);
+        }
         state->head[hash] = (uint32_t)pos + 1;
         return old;
     }
@@ -204,7 +210,13 @@ PTPNG_API_INLINE uint32_t deflate_insert(deflate_state *state,
     if (size - pos < 6) return 0;
     hash = deflate_hash6(src + pos);
     old = state->head[hash];
-    state->previous[pos & (DEFLATE_WINDOW - 1)] = old;
+    {
+        uint32_t prefix;
+        unsigned delta = (uint32_t)pos - (old - 1);
+        memcpy(&prefix, src + pos, sizeof(prefix));
+        state->previous[pos & (DEFLATE_WINDOW - 1)] =
+            (prefix << 16) | (old && delta <= DEFLATE_WINDOW ? delta : 0);
+    }
     /* Modular positions retain the full window even beyond 4 GiB. Zero is
      * the empty-link sentinel, sacrificing only one insertion per 4 GiB. */
     state->head[hash] = (uint32_t)pos + 1;
@@ -217,8 +229,9 @@ static unsigned deflate_match(const deflate_state *state, const uint8_t *src,
                               unsigned *best_distance)
 {
     unsigned limit = (unsigned)(end - pos > 258 ? 258 : end - pos);
-    unsigned best = minimum < 5 ? 5 : minimum, previous_distance = 0;
+    unsigned best = minimum < 5 ? 5 : minimum;
     unsigned attempts = DEFLATE_CHAIN, distance_best = 0;
+    unsigned distance;
     uint32_t prefix_low;
     uint32_t best_tail = 0;
     uint16_t prefix_high;
@@ -238,17 +251,22 @@ static unsigned deflate_match(const deflate_state *state, const uint8_t *src,
     }
 #endif
     if (best >= 8) attempts >>= 2;
-    while (link && attempts--) {
-        unsigned distance = (uint32_t)pos - (link - 1);
+    distance = (uint32_t)pos - (link - 1);
+    while (attempts--) {
         size_t ref;
         unsigned length;
-        uint32_t next_link;
+        uint32_t entry;
+        unsigned next_delta;
         uint32_t candidate_tail;
         int matches;
-        if (!distance || distance > DEFLATE_WINDOW || distance > pos ||
-            distance <= previous_distance) break;
+        if (!distance || distance > DEFLATE_WINDOW || distance > pos) break;
         ref = pos - distance;
-        next_link = state->previous[ref & (DEFLATE_WINDOW - 1)];
+        entry = state->previous[ref & (DEFLATE_WINDOW - 1)];
+        next_delta = entry & UINT32_C(0xffff);
+        /* A reference at distance DEFLATE_WINDOW shares the current slot.
+         * Its overwritten tag equals the query tag and cannot reject it. */
+        if ((entry >> 16) != (uint16_t)prefix_low)
+            goto next_match;
         /* The six-byte prefix already proves an improvement over five.
          * For longer best matches, reject candidates with four bytes ending
          * at best before scanning their prefix. best < limit bounds both. */
@@ -304,8 +322,10 @@ match_done:
             }
         }
 next_match:
-        previous_distance = distance;
-        link = next_link;
+        /* An overwritten slot is only possible at the full window distance.
+         * Any positive delta then leaves the window; zero ends the chain. */
+        if (!next_delta) break;
+        distance += next_delta;
     }
     *best_distance = distance_best;
     return distance_best ? best : 0;
