@@ -64,6 +64,61 @@ passes 930,135 executions across four targets on x64/ARM64 without a
 reported sanitizer finding. The final source changes only GCC placement
 from that kernel; PR checks exercise the complete final revision again.
 
+### Additional isolated trials
+
+The following full comparisons use `90e0c93`, five alternating 0.3-second
+pairs for each of 23 workloads, and all five platforms. Correct output is
+necessary but does not make an optimization useful.
+
+| Candidate | Paired run | Decision |
+| --- | --- | --- |
+| NEON Paeth for three- and six-byte pixels | [38758398415](https://github.com/bojosos/ptpng/actions/runs/38758398415) | Reject. RGB-graphics native decode falls to 0.396x on Linux ARM64, 0.474x on Windows ARM64 and 0.659x on macOS. |
+| Three independent ARM CRC chains | [38758485783](https://github.com/bojosos/ptpng/actions/runs/38758485783) | Reject. Joining the chains does not improve noise decode; Linux ARM64 noise is 0.991x with every pair slower. |
+| Nine-bit inflater literal root | [38758281304](https://github.com/bojosos/ptpng/actions/runs/38758281304) | Reject. RGBA16-photo decode falls to 0.881x on Linux ARM64, 0.837x on Linux x64 and 0.860x on Windows x64. |
+| Eleven-bit inflater literal root | [38759372387](https://github.com/bojosos/ptpng/actions/runs/38759372387) | Leave experimental. Linux RGBA8 improves 5.0–6.7%, but RGB/Gray16/RGBA16 losses remain and macOS graphics lose 5.4%. |
+| Fixed-width Huffman bit reversal | [38760619492](https://github.com/bojosos/ptpng/actions/runs/38760619492) | Reject. Many Linux ARM64 decode workloads lose 0.4–1.0% with every pair slower. |
+| Long-chain deltas and prefix tags | [38759138215](https://github.com/bojosos/ptpng/actions/runs/38759138215) | Reject. Linux x64 graphics encode falls to 0.454–0.465x; Linux ARM64 graphics to 0.860–0.863x. |
+| Gate the exact Kraft stored-block bound | [38758231989](https://github.com/bojosos/ptpng/actions/runs/38758231989) | Leave experimental. Linux noise encode improves 3.3–4.5% in every pair, but overall encoder means are near parity and Linux ARM64 Gray16 loses 0.3%. |
+| Replace the short predecessor ring with one link | [38758316218](https://github.com/bojosos/ptpng/actions/runs/38758316218) | Refine. Linux improves, but Windows ARM64 graphics lose about 4%. |
+| Preserve the old state layout with one active link | [38759917748](https://github.com/bojosos/ptpng/actions/runs/38759917748) | Reject as a fix. Windows ARM64 graphics still lose about 4%; moving tokens or shrinking allocation does not explain that loss. |
+| Also suppress unused interior-link updates | [38761179159](https://github.com/bojosos/ptpng/actions/runs/38761179159) | Retain the mechanism with platform selection below. Windows ARM64 graphics improve 23–30%; Linux graphics improve 6–14%. |
+
+The CRC candidate passes native checksum comparisons and independent raw-state
+composition checks, but adds work without a measured speedup. The Kraft gate
+only decides whether to attempt an exact lower-bound proof; it never chooses
+a stored block heuristically. Its raw streams, PNGs, mixed inputs and bound
+checks remain correct. Neither candidate is included in the retained source.
+
+### Eliminate unused single-candidate links
+
+With a one-candidate short search, only the latest search-position insertion's
+predecessor can be read. Replace the 32,768-entry predecessor ring with one
+link, saving 131,068 bytes of internal state. Interior insertions still update
+both hash heads and the long-match chain, but skip the unused old-head read
+and scalar predecessor store. Search and lazy-lookahead insertions save the
+link before any short search. Window limits, token choices, search budgets
+and encoded bytes are preserved.
+
+The [nine-pair graphics repeat](https://github.com/bojosos/ptpng/actions/runs/38761823294)
+confirms the Linux and Windows ARM64 gains. macOS does not establish a gain,
+so it retains the original ring implementation. Budgets above one also keep
+the ring. These baseline paths retain the original four-argument insertion
+declaration and calls: an earlier unused extra inline argument had changed
+MSVC x64's generated code. Their normalized preprocessor output matches the
+merged baseline exactly.
+
+Final source `70bb0e3` starts from `cc7b3fc`, including the merged palette
+converter. Its [complete comparison](https://github.com/bojosos/ptpng/actions/runs/38762816430)
+uses seven alternating half-second pairs on all five platforms.
+The matching [CI](https://github.com/bojosos/ptpng/actions/runs/38762822821)
+and [coverage fuzzing](https://github.com/bojosos/ptpng/actions/runs/38762828278)
+test that source. Local checks pass six core tests in each of three
+configurations: MSVC's default budget two, optimized budget one, and Apple's
+ring path at budget one. Each also independently passes 2,108 exact raw-stream
+comparisons and eleven exact PNG comparisons against the corresponding
+updated-main build. These measured fixtures do not constrain arbitrary
+inputs or every compiler's performance.
+
 ## 15 October parallel experiments
 
 This round starts from `56bed94`, including the two-candidate short matcher
