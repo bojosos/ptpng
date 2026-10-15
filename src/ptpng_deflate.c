@@ -111,6 +111,13 @@ PTPNG_API_INLINE unsigned deflate_log2(unsigned value)
 #endif
 #endif
 
+/* Apple keeps the existing ring after inconclusive paired measurements. */
+#if DEFLATE_SHORT_CHAIN == 1 && !defined(__APPLE__)
+#define DEFLATE_SINGLE_SHORT_LINK 1
+#else
+#define DEFLATE_SINGLE_SHORT_LINK 0
+#endif
+
 typedef struct { uint16_t value, distance; } deflate_token;
 typedef struct {
     uint32_t head[1u << DEFLATE_HASH_BITS];
@@ -118,7 +125,12 @@ typedef struct {
     /* The long chain hashes six bytes. A separate, shallow three-byte
      * chain recovers profitable short matches in noisier image residuals. */
     uint32_t short_head[1u << DEFLATE_HASH_BITS];
+#if DEFLATE_SINGLE_SHORT_LINK
+    /* A single-candidate search reads only the latest insertion's link. */
+    uint32_t short_link;
+#else
     uint32_t short_previous[DEFLATE_WINDOW];
+#endif
     deflate_token tokens[DEFLATE_TOKENS];
 } deflate_state;
 typedef struct { uint8_t symbol, extra, extra_bits; } deflate_run;
@@ -164,9 +176,15 @@ PTPNG_API_INLINE unsigned deflate_hash6(const uint8_t *p)
                       (64 - DEFLATE_HASH_BITS));
 }
 
+#if DEFLATE_SINGLE_SHORT_LINK
+PTPNG_API_INLINE uint32_t deflate_insert_impl(deflate_state *state,
+                                              const uint8_t *src, size_t pos,
+                                              size_t size, unsigned save_short_link)
+#else
 PTPNG_API_INLINE uint32_t deflate_insert(deflate_state *state,
                                          const uint8_t *src, size_t pos,
                                          size_t size)
+#endif
 {
     unsigned hash;
     uint32_t old;
@@ -185,7 +203,11 @@ PTPNG_API_INLINE uint32_t deflate_insert(deflate_state *state,
         word &= UINT64_C(0x0000ffffffffffff);
         hash = (unsigned)((word * UINT64_C(0x9e3779b97f4a7c15)) >>
                           (64 - DEFLATE_HASH_BITS));
+#if DEFLATE_SINGLE_SHORT_LINK
+        if (save_short_link) state->short_link = state->short_head[short_hash];
+#else
         state->short_previous[pos & (DEFLATE_WINDOW - 1)] = state->short_head[short_hash];
+#endif
         state->short_head[short_hash] = (uint32_t)pos + 1;
         old = state->head[hash];
         state->previous[pos & (DEFLATE_WINDOW - 1)] = old;
@@ -198,7 +220,11 @@ PTPNG_API_INLINE uint32_t deflate_insert(deflate_state *state,
                          ((uint32_t)src[pos + 2] << 16);
         unsigned short_hash = (value * UINT32_C(2654435761)) >>
                               (32 - DEFLATE_HASH_BITS);
+#if DEFLATE_SINGLE_SHORT_LINK
+        if (save_short_link) state->short_link = state->short_head[short_hash];
+#else
         state->short_previous[pos & (DEFLATE_WINDOW - 1)] = state->short_head[short_hash];
+#endif
         state->short_head[short_hash] = (uint32_t)pos + 1;
     }
     if (size - pos < 6) return 0;
@@ -210,6 +236,15 @@ PTPNG_API_INLINE uint32_t deflate_insert(deflate_state *state,
     state->head[hash] = (uint32_t)pos + 1;
     return old;
 }
+
+#if DEFLATE_SINGLE_SHORT_LINK
+#define deflate_insert(state, src, pos, size) \
+    deflate_insert_impl(state, src, pos, size, 1)
+#define deflate_insert_interior(state, src, pos, size) \
+    deflate_insert_impl(state, src, pos, size, 0)
+#else
+#define deflate_insert_interior deflate_insert
+#endif
 
 static unsigned deflate_match(const deflate_state *state, const uint8_t *src,
                               size_t pos, size_t end, uint32_t link,
@@ -328,7 +363,11 @@ static unsigned deflate_short_match(const deflate_state *state, const uint8_t *s
 #endif
     *best_distance = 0;
     if (limit < 3 || limit <= minimum) return 0;
+#if DEFLATE_SINGLE_SHORT_LINK
+    link = state->short_link;
+#else
     link = state->short_previous[pos & (DEFLATE_WINDOW - 1)];
+#endif
     if (!link) return 0;
 #if PTPNG_DEFLATE_WORD_STORE
     if (limit >= 4) memcpy(&prefix, src + pos, sizeof(prefix));
@@ -345,7 +384,11 @@ static unsigned deflate_short_match(const deflate_state *state, const uint8_t *s
         if (!distance || distance > DEFLATE_WINDOW || distance > pos ||
             distance <= previous_distance) break;
         ref = pos - distance;
+#if DEFLATE_SINGLE_SHORT_LINK
+        next_link = 0;
+#else
         next_link = state->short_previous[ref & (DEFLATE_WINDOW - 1)];
+#endif
 #if PTPNG_DEFLATE_WORD_STORE
         {
             uint32_t candidate = 0;
@@ -448,8 +491,10 @@ static size_t deflate_parse(deflate_state *state, const uint8_t *src,
             ++lit_freq[257 + ls];
             ++dist_freq[ds];
             *extra_bits += deflate_len_extra[ls] + (ds < 4 ? 0 : (ds >> 1) - 1);
+            /* The next search inserts its own position first, so interior
+             * single-candidate predecessor links are never observed. */
             for (insert = pos + 1 + inserted_next; insert < pos + length; ++insert)
-                deflate_insert(state, src, insert, size);
+                deflate_insert_interior(state, src, insert, size);
             pos += length;
         } else {
             state->tokens[count].value = src[pos];
