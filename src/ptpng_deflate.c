@@ -172,7 +172,7 @@ PTPNG_API_INLINE unsigned deflate_hash6(const uint8_t *p)
 
 PTPNG_API_INLINE uint32_t deflate_insert(deflate_state *state,
                                          const uint8_t *src, size_t pos,
-                                         size_t size)
+                                         size_t size, unsigned save_short_link)
 {
     unsigned hash;
     uint32_t old;
@@ -194,7 +194,7 @@ PTPNG_API_INLINE uint32_t deflate_insert(deflate_state *state,
 #if DEFLATE_SHORT_CHAIN > 1
         state->short_previous[pos & (DEFLATE_WINDOW - 1)] = state->short_head[short_hash];
 #else
-        state->short_link = state->short_head[short_hash];
+        if (save_short_link) state->short_link = state->short_head[short_hash];
 #endif
         state->short_head[short_hash] = (uint32_t)pos + 1;
         old = state->head[hash];
@@ -211,7 +211,7 @@ PTPNG_API_INLINE uint32_t deflate_insert(deflate_state *state,
 #if DEFLATE_SHORT_CHAIN > 1
         state->short_previous[pos & (DEFLATE_WINDOW - 1)] = state->short_head[short_hash];
 #else
-        state->short_link = state->short_head[short_hash];
+        if (save_short_link) state->short_link = state->short_head[short_hash];
 #endif
         state->short_head[short_hash] = (uint32_t)pos + 1;
     }
@@ -435,7 +435,7 @@ static size_t deflate_parse(deflate_state *state, const uint8_t *src,
             distance = cached_distance;
             cached = 0;
         } else {
-            uint32_t link = deflate_insert(state, src, pos, size);
+            uint32_t link = deflate_insert(state, src, pos, size, 1);
             length = deflate_match(state, src, pos, end, link, 5, &distance);
             if (!length)
                 length = deflate_short_match(state, src, pos, end, 2, literal_bits, &distance);
@@ -445,7 +445,7 @@ static size_t deflate_parse(deflate_state *state, const uint8_t *src,
         if (length >= 3 && length < 64 && end - pos >= 4 &&
             count + 1 < DEFLATE_TOKENS) {
             unsigned next_distance, next_length;
-            uint32_t link = deflate_insert(state, src, pos + 1, size);
+            uint32_t link = deflate_insert(state, src, pos + 1, size, 1);
             inserted_next = 1;
             next_length = deflate_match(state, src, pos + 1, end, link, length,
                                         &next_distance);
@@ -470,8 +470,10 @@ static size_t deflate_parse(deflate_state *state, const uint8_t *src,
             ++lit_freq[257 + ls];
             ++dist_freq[ds];
             *extra_bits += deflate_len_extra[ls] + (ds < 4 ? 0 : (ds >> 1) - 1);
+            /* The next search inserts its own position first, so these
+             * single-candidate predecessor links are never observed. */
             for (insert = pos + 1 + inserted_next; insert < pos + length; ++insert)
-                deflate_insert(state, src, insert, size);
+                deflate_insert(state, src, insert, size, 0);
             pos += length;
         } else {
             state->tokens[count].value = src[pos];
