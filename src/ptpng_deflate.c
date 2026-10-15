@@ -320,6 +320,7 @@ static unsigned deflate_short_match(const deflate_state *state, const uint8_t *s
     uint32_t link;
 #if PTPNG_DEFLATE_WORD_STORE
     uint32_t prefix = 0;
+    uint32_t prefix_mask = minimum >= 3 ? UINT32_MAX : UINT32_C(0x00ffffff);
 #endif
     *best_distance = 0;
     if (limit < 3 || limit <= minimum) return 0;
@@ -329,7 +330,6 @@ static unsigned deflate_short_match(const deflate_state *state, const uint8_t *s
     if (limit >= 4) memcpy(&prefix, src + pos, sizeof(prefix));
     else prefix = src[pos] | ((uint32_t)src[pos + 1] << 8) |
                   ((uint32_t)src[pos + 2] << 16);
-    prefix &= UINT32_C(0x00ffffff);
 #endif
     while (link && attempts--) {
         unsigned distance = (uint32_t)pos - (link - 1);
@@ -337,25 +337,35 @@ static unsigned deflate_short_match(const deflate_state *state, const uint8_t *s
         uint32_t next_link;
         size_t ref;
         int matches;
+#if PTPNG_DEFLATE_WORD_STORE
+        uint32_t candidate = 0;
+#endif
         if (!distance || distance > DEFLATE_WINDOW || distance > pos ||
             distance <= previous_distance) break;
         ref = pos - distance;
         next_link = state->short_previous[ref & (DEFLATE_WINDOW - 1)];
 #if PTPNG_DEFLATE_WORD_STORE
         {
-            uint32_t candidate = 0;
             if (limit >= 4) memcpy(&candidate, src + ref, sizeof(candidate));
             else candidate = src[ref] | ((uint32_t)src[ref + 1] << 8) |
                              ((uint32_t)src[ref + 2] << 16);
-            matches = (candidate & UINT32_C(0x00ffffff)) == prefix;
+            matches = ((candidate ^ prefix) & prefix_mask) == 0;
         }
 #else
         matches = src[ref] == src[pos] && src[ref + 1] == src[pos + 1] &&
                   src[ref + 2] == src[pos + 2];
 #endif
         if (matches) {
+#if PTPNG_DEFLATE_WORD_STORE
+            /* The prefix load already compared byte three when it is in
+             * bounds. Reuse that result instead of reading it again. */
+            length = 3 + (limit >= 4 && candidate == prefix);
+            if (length == 4 && limit == 5 && src[ref + 4] == src[pos + 4])
+                length = 5;
+#else
             length = 3;
             while (length < limit && src[ref + length] == src[pos + length]) ++length;
+#endif
             if (length > minimum) {
                 cost = 14 + (distance <= 4 ? 0 : deflate_log2(distance - 1) - 1);
                 /* Every short match covers three bytes, and at most five. */
@@ -368,6 +378,9 @@ static unsigned deflate_short_match(const deflate_state *state, const uint8_t *s
                     distance_best = distance;
                     best_saving = literal_cost - cost;
                 }
+                /* Later candidates are farther away and cannot have a
+                 * lower distance cost. No short match beats five bytes. */
+                if (length == 5) break;
             }
         }
         previous_distance = distance;
@@ -422,7 +435,7 @@ static size_t deflate_parse(deflate_state *state, const uint8_t *src,
             inserted_next = 1;
             next_length = deflate_match(state, src, pos + 1, end, link, length,
                                         &next_distance);
-            if (!next_length)
+            if (!next_length && length < 5)
                 next_length = deflate_short_match(state, src, pos + 1, end, length,
                                                   literal_bits, &next_distance);
             if (next_length > length) {
