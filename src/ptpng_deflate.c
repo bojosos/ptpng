@@ -768,6 +768,11 @@ static int deflate_stored_block(deflate_writer *w, const uint8_t *src,
     return 1;
 }
 
+#if defined(__linux__) && defined(__x86_64__) && defined(__GNUC__) && \
+    !defined(__clang__)
+/* Keep the hot compressor on a complete instruction-fetch boundary. */
+__attribute__((aligned(32)))
+#endif
 static int deflate_compress(deflate_writer *w, deflate_state *state,
                             const uint8_t *src, size_t size)
 {
