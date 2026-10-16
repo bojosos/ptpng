@@ -240,6 +240,11 @@ static int build_fixed(void)
 
 /* --------------------------------------------------------------------- */
 
+#if defined(__linux__) && defined(__x86_64__) && defined(__GNUC__) && \
+    !defined(__clang__)
+/* Keep the hot literal loop's cache-line phase stable as callers change. */
+__attribute__((aligned(64)))
+#endif
 static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                         size_t out_len, uint32_t flags, int exact_size,
                         size_t *produced)
