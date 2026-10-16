@@ -718,6 +718,8 @@ static int deflate_emit_tokens(deflate_writer *w, const deflate_token *tokens,
     for (i = 0; i < count; ++i) {
         unsigned value = tokens[i].value, distance = tokens[i].distance;
         if (!distance) {
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64)
+            /* Paired photo measurements favor literal pairing on native MSVC x64. */
             uint32_t first = lit_codes[value];
             if (i + 1 < count && !tokens[i + 1].distance) {
                 uint32_t second = lit_codes[tokens[++i].value];
@@ -728,6 +730,9 @@ static int deflate_emit_tokens(deflate_writer *w, const deflate_token *tokens,
                                    ((second & 65535) << bits),
                                  bits + (second >> 16))) return 0;
             } else if (!deflate_code(w, first)) return 0;
+#else
+            if (!deflate_code(w, lit_codes[value])) return 0;
+#endif
         } else {
             unsigned ls = len_symbol[value], ds = deflate_dist_symbol(distance);
             uint32_t code = lit_codes[257 + ls];
