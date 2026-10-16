@@ -718,7 +718,16 @@ static int deflate_emit_tokens(deflate_writer *w, const deflate_token *tokens,
     for (i = 0; i < count; ++i) {
         unsigned value = tokens[i].value, distance = tokens[i].distance;
         if (!distance) {
-            if (!deflate_code(w, lit_codes[value])) return 0;
+            uint32_t first = lit_codes[value];
+            if (i + 1 < count && !tokens[i + 1].distance) {
+                uint32_t second = lit_codes[tokens[++i].value];
+                unsigned bits = first >> 16;
+                /* Two literal codes occupy at most 30 bits, within the
+                 * existing writer's bound on every supported target. */
+                if (!deflate_put(w, (first & 65535) |
+                                   ((second & 65535) << bits),
+                                 bits + (second >> 16))) return 0;
+            } else if (!deflate_code(w, first)) return 0;
         } else {
             unsigned ls = len_symbol[value], ds = deflate_dist_symbol(distance);
             uint32_t code = lit_codes[257 + ls];
