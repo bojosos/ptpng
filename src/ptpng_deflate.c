@@ -2,6 +2,12 @@
  * fixed, or stored blocks selected by their bit cost. All state is per call. */
 #include "ptpng_internal.h"
 
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64)
+/* This subsection sorts before ordinary .text$mn code. Keep encoder
+ * placement independent of changes to the inflater's instruction count. */
+#pragma code_seg(push, ".text$deflate")
+#endif
+
 /* These 64-bit targets permit unaligned stores. Keep big-endian ARM and
  * architectures with unknown byte order on the byte-oriented writer. */
 #if PTPNG_X64 || defined(_M_ARM64) || \
@@ -873,3 +879,7 @@ int ptpng_deflate(const uint8_t *src, size_t size, uint8_t **out, size_t *out_le
     *out_len = writer.pos;
     return PTPNG_OK;
 }
+
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64)
+#pragma code_seg(pop)
+#endif
