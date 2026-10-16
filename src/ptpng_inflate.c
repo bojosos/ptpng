@@ -30,6 +30,13 @@
 #else
 #define INFLATE_BATCH_BIT_GUARD 0
 #endif
+#ifndef INFLATE_FIXED_WIDTH_BATCH
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64)
+#define INFLATE_FIXED_WIDTH_BATCH 1
+#else
+#define INFLATE_FIXED_WIDTH_BATCH 0
+#endif
+#endif
 #define DIST_ROOT     8
 #define DIST_SIZE     (1u << DIST_ROOT)
 #define DIST_ARENA    4096
@@ -68,6 +75,15 @@ PTPNG_API_INLINE void ptpng_store64le(void *p, uint64_t v)
 {
     memcpy(p, &v, 8);
 }
+
+#if INFLATE_FIXED_WIDTH_BATCH
+PTPNG_API_INLINE unsigned fixed_literal_bits(uint64_t bits)
+{
+    /* Fixed nine-bit literals have low-five-bit prefixes 7,11,...,31.
+     * Derive their widths before waiting for the table's literal byte. */
+    return 8u + ((UINT32_C(0x88888880) >> ((unsigned)bits & 31)) & 1u);
+}
+#endif
 
 PTPNG_API_INLINE uint32_t rev_bits(uint32_t v, unsigned n)
 {
@@ -423,6 +439,25 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                 return PTPNG_E_TRUNCATED;
 
             REFILL();
+#if INFLATE_FIXED_WIDTH_BATCH
+            if (btype == 1 && pos + 8 <= out_len && bitcnt >= 36) {
+                /* Widths are independent of table loads in this fixed-code
+                 * batch. A nonliteral leaves its bits for slow_decode. */
+#define FIXED_LITERAL() do {                                             \
+                    unsigned fixed_nb = fixed_literal_bits(bitbuf);    \
+                    uint32_t fixed_e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)]; \
+                    if (fixed_e <= F_LIT) goto slow_decode;             \
+                    out[pos++] = (uint8_t)(fixed_e >> 8);               \
+                    DROP(fixed_nb);                                    \
+                } while (0)
+                FIXED_LITERAL();
+                FIXED_LITERAL();
+                FIXED_LITERAL();
+                FIXED_LITERAL();
+#undef FIXED_LITERAL
+                continue;
+            }
+#endif
 #if INFLATE_BATCH_BIT_GUARD
             if (pos + 8 <= out_len && bitcnt >= 4 * LITLEN_ROOT) {
 #else
