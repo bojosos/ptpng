@@ -187,8 +187,14 @@ void ptpng_filter_paeth_avx2(uint8_t *dst, const uint8_t *src,
                 hi = _mm_max_epi16(a, b);
                 threshold = _mm_sub_epi16(_mm_add_epi16(c, _mm_slli_epi16(c, 1)),
                                           _mm_add_epi16(a, b));
-                predictor = _mm_blendv_epi8(hi, c, _mm_cmpgt_epi16(threshold, lo));
-                predictor = _mm_blendv_epi8(lo, predictor, _mm_cmpgt_epi16(hi, threshold));
+                {
+                    __m128i above_lo = _mm_cmpgt_epi16(threshold, lo);
+                    __m128i below_hi = _mm_cmpgt_epi16(hi, threshold);
+                    predictor = _mm_or_si128(
+                        _mm_and_si128(c, _mm_and_si128(above_lo, below_hi)),
+                        _mm_or_si128(_mm_andnot_si128(below_hi, lo),
+                                     _mm_andnot_si128(above_lo, hi)));
+                }
                 a = _mm_and_si128(_mm_add_epi16(s, predictor), mask);
                 c = b;
                 _mm_storel_epi64((__m128i *)(dst + i), _mm_packus_epi16(a, a));
@@ -211,8 +217,16 @@ void ptpng_filter_paeth_avx2(uint8_t *dst, const uint8_t *src,
          * Threshold equality must select a or b, never c. */
         threshold = _mm_sub_epi16(_mm_add_epi16(c, _mm_slli_epi16(c, 1)),
                                   _mm_add_epi16(a, b));
-        predictor = _mm_blendv_epi8(hi, c, _mm_cmpgt_epi16(threshold, lo));
-        predictor = _mm_blendv_epi8(lo, predictor, _mm_cmpgt_epi16(hi, threshold));
+        /* Independent masks avoid two dependent variable blends. At equal
+         * edges both edge masks can select, but lo and hi are identical. */
+        {
+            __m128i above_lo = _mm_cmpgt_epi16(threshold, lo);
+            __m128i below_hi = _mm_cmpgt_epi16(hi, threshold);
+            predictor = _mm_or_si128(
+                _mm_and_si128(c, _mm_and_si128(above_lo, below_hi)),
+                _mm_or_si128(_mm_andnot_si128(below_hi, lo),
+                             _mm_andnot_si128(above_lo, hi)));
+        }
         a = _mm_and_si128(_mm_add_epi16(s, predictor), mask);
         c = b;
         out = (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(a, a));
