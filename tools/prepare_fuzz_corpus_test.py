@@ -5,8 +5,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import struct
+import zlib
 
-from prepare_fuzz_corpus import DEFLATE_LIMIT, deflate_seeds
+from prepare_fuzz_corpus import (DEFLATE_LIMIT, deflate_seeds,
+                                 fragmented_stored_seeds, idat_stream)
 
 
 class DeflateCorpusTests(unittest.TestCase):
@@ -41,6 +44,16 @@ class DeflateCorpusTests(unittest.TestCase):
         self.assertEqual(len(set(changing[1 << 18:2 << 18])), 256)
         self.assertEqual(set(changing[2 << 18:3 << 18]), set(range(4)))
 
+    def test_fragmented_stored_pixels(self):
+        seeds = list(fragmented_stored_seeds())
+        self.assertEqual(len(seeds), 7)
+        for png in seeds:
+            width, height = struct.unpack_from(">II", png, 16)
+            expected = (b"\0" + bytes(i % 251 for i in range(width))) * height
+            self.assertEqual(zlib.decompress(idat_stream(png)), expected)
+            self.assertGreater(png.count(b"IDAT"), 3)
+            self.assertIn(b"\0\0\0\0IDAT", png)
+
     def test_cli_adds_four_corpora_and_preserves_discoveries(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -59,6 +72,8 @@ class DeflateCorpusTests(unittest.TestCase):
                 self.assertTrue(any((output / name).iterdir()), name)
             for raw in self.seeds.values():
                 self.assertEqual((deflate / hashlib.sha256(raw).hexdigest()).read_bytes(), raw)
+            for png in fragmented_stored_seeds():
+                self.assertEqual((output / "decode" / hashlib.sha256(png).hexdigest()).read_bytes(), png)
 
 
 if __name__ == "__main__":

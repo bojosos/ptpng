@@ -24,6 +24,12 @@
 #define LITLEN_ROOT   10
 #define LITLEN_SIZE   (1u << LITLEN_ROOT)
 #define LITLEN_ARENA  2048
+#if defined(__linux__) && defined(__aarch64__) && defined(__GNUC__) && \
+    !defined(__clang__)
+#define INFLATE_BATCH_BIT_GUARD 1
+#else
+#define INFLATE_BATCH_BIT_GUARD 0
+#endif
 #define DIST_ROOT     8
 #define DIST_SIZE     (1u << DIST_ROOT)
 #define DIST_ARENA    4096
@@ -417,8 +423,14 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                 return PTPNG_E_TRUNCATED;
 
             REFILL();
+#if INFLATE_BATCH_BIT_GUARD
+            if (pos + 8 <= out_len && bitcnt >= 4 * LITLEN_ROOT) {
+#else
             if (pos + 8 <= out_len) {
+#endif
                 /* Up to four root-table literals share one refill. */
+                /* On selected compilers, the batch guard proves all four
+                 * root literals fit. Short input tails use slow_decode. */
                 /* build_table gives valid literals a nonzero bit count, so
                  * their entries exceed F_LIT. Reserved symbols are exactly
                  * F_LIT; matches, EOB and subtable entries are below it. */
@@ -429,21 +441,33 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                     bitbuf >>= nb; bitcnt -= nb;
                     e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
                     nb = e & 0xF;
+#if INFLATE_BATCH_BIT_GUARD
+                    if (e > F_LIT) {
+#else
                     if (e > F_LIT &&
                         (unsigned)bitcnt >= nb) {
+#endif
                         out[pos + 1] = (uint8_t)(e >> 8);
                         bitbuf >>= nb; bitcnt -= nb;
                         pos += 2;
                         e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
                         nb = e & 0xF;
+#if INFLATE_BATCH_BIT_GUARD
+                        if (e > F_LIT) {
+#else
                         if (e > F_LIT &&
                             bitcnt >= (int)nb) {
+#endif
                             out[pos++] = (uint8_t)(e >> 8);
                             DROP(nb);
                             e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
                             nb = e & 0xF;
+#if INFLATE_BATCH_BIT_GUARD
+                            if (e > F_LIT) {
+#else
                             if (e > F_LIT &&
                                 bitcnt >= (int)nb) {
+#endif
                                 out[pos++] = (uint8_t)(e >> 8);
                                 DROP(nb);
                                 continue;
@@ -703,3 +727,71 @@ int ptpng_inflate_dyn(const uint8_t *in, size_t in_len, size_t max_out,
     *out_len = produced;
     return PTPNG_OK;
 }
+
+#if defined(__linux__)
+PTPNG_API_INLINE int stored_byte(const struct ptpng_inflate_chunk *chunks,
+                                 size_t count, size_t *index, size_t *offset,
+                                 uint8_t *byte)
+{
+    while (*index < count && *offset == chunks[*index].len) {
+        ++*index;
+        *offset = 0;
+    }
+    if (*index == count) return 0;
+    *byte = chunks[*index].p[(*offset)++];
+    return 1;
+}
+
+int ptpng_try_inflate_stored(const struct ptpng_inflate_chunk *chunks,
+                              size_t count, uint8_t *out, size_t out_len,
+                              uint32_t flags)
+{
+    size_t index = 0, offset = 0, pos = 0;
+    uint8_t cmf, flg, header, lengths[4], byte;
+    uint32_t want = 0;
+    unsigned i;
+    if (!stored_byte(chunks, count, &index, &offset, &cmf) ||
+        !stored_byte(chunks, count, &index, &offset, &flg)) return 0;
+    if ((cmf & 15) != 8 || (cmf >> 4) > 7 ||
+        (((unsigned)cmf << 8) | flg) % 31 || (flg & 32)) return 0;
+    for (;;) {
+        unsigned length, complement;
+        if (!stored_byte(chunks, count, &index, &offset, &header) ||
+            (header & 6)) return 0;
+        /* Each stored block starts and ends byte-aligned. Its five high
+         * header bits are padding, which the general inflater also ignores. */
+        for (i = 0; i < 4; ++i)
+            if (!stored_byte(chunks, count, &index, &offset, &lengths[i])) return 0;
+        length = (unsigned)lengths[0] | ((unsigned)lengths[1] << 8);
+        complement = (unsigned)lengths[2] | ((unsigned)lengths[3] << 8);
+        if (length != (complement ^ 65535u) || length > out_len - pos) return 0;
+        while (length) {
+            size_t take;
+            while (index < count && offset == chunks[index].len) {
+                ++index;
+                offset = 0;
+            }
+            if (index == count) return 0;
+            take = chunks[index].len - offset;
+            if (take > length) take = length;
+            memcpy(out + pos, chunks[index].p + offset, take);
+            pos += take;
+            offset += take;
+            length -= (unsigned)take;
+        }
+        if (header & 1) break;
+    }
+    if (pos != out_len) return 0;
+    for (i = 0; i < 4; ++i) {
+        if (!stored_byte(chunks, count, &index, &offset, &byte)) return 0;
+        want = (want << 8) | byte;
+    }
+    while (index < count && offset == chunks[index].len) {
+        ++index;
+        offset = 0;
+    }
+    if (index != count) return 0; /* no bytes may follow the Adler checksum */
+    if (!(flags & PTPNG_INF_NO_ADLER) && ptpng_adler32(out, out_len) != want) return 0;
+    return 1;
+}
+#endif

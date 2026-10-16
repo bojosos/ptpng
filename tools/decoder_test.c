@@ -433,6 +433,80 @@ static void fixed_symbol(unsigned char *dst, unsigned *bit, unsigned symbol)
     put_bits(dst, bit, reversed, n);
 }
 
+static void test_fragmented_stored_blocks(void)
+{
+    /* Empty, non-final and final stored blocks with nonzero padding bits.
+     * They represent a None filter and one gray pixel, value 73. */
+    static const unsigned char stored[] = {
+        0x78,0x01, 0xf8,0,0,255,255,
+        0xf8,1,0,254,255,0, 0xf9,1,0,254,255,73, 0,75,0,74
+    };
+    unsigned variant;
+    for (variant = 0; variant < 10; ++variant) {
+        unsigned char zs[40], header[13];
+        size_t n = sizeof(stored), split, limit;
+        ptpng_opts opts = {0};
+        int expected = PTPNG_OK;
+        memcpy(zs, stored, n);
+        memcpy(header, ihdr, sizeof(header));
+        if (variant == 1 || variant == 2) {
+            zs[n - 1] ^= 1;
+            if (variant == 1) expected = PTPNG_E_BAD_ADLER;
+            else opts.flags = PTPNG_FLAG_NO_VERIFY_ADLER;
+        } else if (variant == 3) {
+            zs[10] ^= 1; /* invalid stored length complement */
+            expected = PTPNG_E_INFLATE_CORRUPT;
+        } else if (variant == 4) {
+            zs[n++] = 0; /* trailing stream data is not padding */
+            expected = PTPNG_E_INFLATE_CORRUPT;
+        } else if (variant == 5) {
+            unsigned bit = 13 * 8;
+            memset(zs + 13, 0, sizeof(zs) - 13);
+            put_bits(zs, &bit, 3, 3); /* stored prefix, final fixed suffix */
+            fixed_symbol(zs, &bit, 73);
+            fixed_symbol(zs, &bit, 256);
+            n = (bit + 7) / 8;
+            be32(zs + n, 0x004b004aUL);
+            n += 4;
+        } else if (variant == 7) {
+            static const unsigned char raw[] = {0, 73, 74};
+            n = zstream(zs, raw, sizeof(raw));
+            expected = PTPNG_E_INFLATE_SIZE;
+        } else if (variant == 8) {
+            header[3] = 2; /* stream is shorter than the geometry requires */
+            expected = PTPNG_E_INFLATE_SIZE;
+        } else if (variant == 9) {
+            zs[1] = 0x20; /* valid FCHECK, forbidden preset dictionary */
+            expected = PTPNG_E_BAD_ZLIB_HEADER;
+        }
+        /* Every possible two-way split crosses headers, payload or Adler.
+         * Extra empty IDAT chunks exercise empty-fragment traversal. */
+        for (limit = variant == 6 ? 0 : n; limit <= n; ++limit) {
+            for (split = 0; split <= limit; ++split) {
+                void *out = NULL;
+                size_t len = 0;
+                int rc;
+                begin_png();
+                png_size = 8;
+                chunk("IHDR", header, sizeof(header));
+                chunk("IDAT", NULL, 0);
+                chunk("IDAT", zs, split);
+                chunk("IDAT", NULL, 0);
+                chunk("IDAT", zs + split, limit - split);
+                chunk("IDAT", NULL, 0);
+                chunk("IEND", NULL, 0);
+                rc = ptpng_decode(png_data, png_size, &opts, &out, &len, NULL);
+                if (limit != n) CHECK(rc != PTPNG_OK);
+                else CHECK(rc == expected);
+                if (rc == PTPNG_OK) CHECK(out && len == 1 && ((unsigned char *)out)[0] == 73);
+                else CHECK(out == NULL && len == 0);
+                ptpng_free(out);
+            }
+            if (variant != 6) break;
+        }
+    }
+}
+
 static void test_literal_boundaries(void)
 {
     unsigned len, invalid;
@@ -547,6 +621,7 @@ int main(void)
     test_color_conversion_boundaries();
     test_palette_conversion_boundaries();
     test_mixed_blocks();
+    test_fragmented_stored_blocks();
     test_literal_boundaries();
     test_match_copies();
     if (failures) return 1;

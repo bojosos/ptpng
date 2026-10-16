@@ -109,6 +109,22 @@ def metadata_seeds():
         yield image(chunks + compressed_text + splt16)
 
 
+def fragmented_stored_seeds():
+    """Reach direct stored decoding with split headers, payloads and checksums."""
+    for width, height, steps in ((257, 1, (1, 2, 3, 7, 31)),
+                                 (65534, 2, (4093, 65535))):
+        raw = (b"\0" + bytes(i % 251 for i in range(width))) * height
+        stream = zlib.compress(raw, 0)
+        header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+        for step in steps:
+            parts = [b"\x89PNG\r\n\x1a\n", png_chunk(b"IHDR", header),
+                     png_chunk(b"IDAT", b"")]
+            for offset in range(0, len(stream), step):
+                parts.append(png_chunk(b"IDAT", stream[offset:offset + step]))
+                parts.append(png_chunk(b"IDAT", b""))
+            yield b"".join(parts) + png_chunk(b"IEND", b"")
+
+
 def deflate_seeds():
     """Raw compressor inputs, independent of the encoder's 64 KiB pixel cap."""
     rng = random.Random(0xDEF1A7E)
@@ -153,6 +169,8 @@ def main():
     for directory in directories.values():
         directory.mkdir(parents=True, exist_ok=True)
     for data in metadata_seeds():
+        save(directories["decode"], data)
+    for data in fragmented_stored_seeds():
         save(directories["decode"], data)
     for _, data in deflate_seeds():
         save(directories["deflate"], data)
