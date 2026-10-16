@@ -4,6 +4,105 @@ ptpng targets fast single-threaded PNG decoding on x86 AVX2 and ARM64
 NEON. A kernel benchmark measures one operation; it does not establish
 the speed of a complete PNG decode or a lead over every other decoder.
 
+## 16 October nightly investigation
+
+The [nightly on `f698c88`](https://github.com/bojosos/ptpng/actions/runs/38869992861)
+passes all five platforms. All 135 decode comparisons beat libpng with
+zlib-ng. The within-run geometric means are:
+
+| Platform | Decode, 27 cases | Encode against level 6, nine images |
+| --- | ---: | ---: |
+| Linux x64 | 1.664x | 1.943x |
+| Linux ARM64 | 1.607x | 1.445x |
+| macOS ARM64 | 1.633x | 1.443x |
+| Windows x64 | 1.738x | 1.723x |
+| Windows ARM64 | 1.491x | 1.675x |
+
+Windows x64 noise remains a narrow lead: native/RGBA8/RGB8 decode is
+1.046x/1.047x/1.069x. Windows ARM64 native noise is 1.027x. RGBA16-photo
+encoding is another weak spot, at 1.004x on Windows x64 and 0.861x on macOS.
+These ratios compare implementations within one run; they do not identify
+code regressions between different nightly machines.
+
+The [fresh profiles](https://github.com/bojosos/ptpng/actions/runs/38929309789)
+retain the Linux inputs and executable files. Input compression differs by
+platform: Linux noise is a 3,147,615-byte stored stream, while the Windows
+noise input is 3,319,878 bytes and uses Huffman compression. The local Windows
+fixture matches the latter size. A Windows VTune profile of that fixture
+attributes about 80% of samples to inflation; the Linux x64 profile instead
+attributes 32% to a libc memory routine, 30% to Paeth, 22% to CRC and 10% to
+Adler. Optimizations for one stream must not be attributed to the other.
+
+### Read fragmented stored streams directly
+
+Linux's noise input has 49 IDAT chunks and 96 stored blocks. Previously the
+decoder allocated a contiguous compressed buffer, copied all IDAT payloads
+into it, then copied stored payloads into the raw image buffer. The new
+internal reader copies stored payloads directly from the parsed chunk spans.
+It retains the zero-copy input path for a single IDAT chunk.
+
+Success requires a valid zlib header, complementary stored-block lengths,
+exact output size, the final block, the Adler checksum unless verification
+is disabled, and no trailing data. Empty chunks and splits within any header,
+payload or checksum are accepted. Unsupported or malformed streams return
+to the existing inflater; any partially written raw output is disposable.
+The general inflater retains responsibility for the normal error result.
+
+The [first full comparison](https://github.com/bojosos/ptpng/actions/runs/38930195879)
+tests `93948c7` against `f698c88`, five alternating 0.3-second pairs for all
+23 workloads on five platforms. All 575 input/decoded/output size tuples
+match. Linux ARM64 native noise improves 2.263x (2.261–2.277x), and Linux x64
+2.673x (2.611–2.736x). Windows and macOS do not establish a noise gain.
+The [seven-pair half-second repeat](https://github.com/bojosos/ptpng/actions/runs/38931036409)
+confirms native noise at 2.270x on Linux ARM64 and 2.627x on Linux x64,
+but also repeats a 1.5% Linux ARM64 RGBA8/Gray8-photo loss.
+
+ELF inspection finds unchanged inflater instructions apart from relocations,
+but its address moves by 112 bytes. The first literal lookup changes from
+offset 44 to offset 60 within a 64-byte cache line, crossing the boundary
+immediately. This is a plausible placement effect, not a proven cause of
+the entire loss. A revised caller branches directly to unfiltering after
+stored success and preserves the original general-inflate block verbatim.
+
+Eight local C/C++ tests pass. New public-decoder regressions cover every
+two-way split, empty IDAT chunks, nonzero stored padding, mixed stored/fixed
+blocks, truncation, invalid complements, output-size mismatches, preset
+dictionaries, bad Adler checksums and trailing bytes. A separate 2,942-case
+differential experiment matches baseline status, size and pixels, including
+860 valid stored cases checked against independent expected pixels and
+maximum 65,535-byte blocks. The matching
+[CI](https://github.com/bojosos/ptpng/actions/runs/38930201372) and
+[sanitizer fuzzing](https://github.com/bojosos/ptpng/actions/runs/38930206944)
+pass; the latter completes 1,799,984 executions across eight campaigns.
+Seven additional stored PNG seeds keep fragmented decoding reachable in
+future fuzz campaigns, with independent zlib checks on their raw pixels.
+The [seeded campaign](https://github.com/bojosos/ptpng/actions/runs/38931237302)
+passes another 1,248,123 executions.
+
+### Other isolated trials
+
+Each initial comparison uses five alternating 0.3-second pairs for all
+23 workloads on all five platforms, against `f698c88`.
+
+| Trial | Paired run | Decision |
+| --- | --- | --- |
+| Reassociate the AVX2 Paeth arithmetic | [38929563943](https://github.com/bojosos/ptpng/actions/runs/38929563943), [repeat](https://github.com/bojosos/ptpng/actions/runs/38930313008) | Reject. Windows x64 noise is 0.996x in the nine-pair half-second repeat; the earlier RGBA8-to-RGB gain does not repeat. |
+| Replace dependent Paeth blends with independent masks | [38929773119](https://github.com/bojosos/ptpng/actions/runs/38929773119) | Reject. RGBA16 graphics decode falls to 0.886x on Windows x64 and 0.850x on Linux x64. |
+| Process 64 bytes per AVX2 Adler iteration | [38929990231](https://github.com/bojosos/ptpng/actions/runs/38929990231) | Leave experimental. Windows x64 noise is 1.003x (0.998–1.131x); Linux x64 is 1.005x (0.995–1.007x). No stable target gain. |
+| Pair adjacent literal-code writer updates | [38930119513](https://github.com/bojosos/ptpng/actions/runs/38930119513), [MSVC x64 repeat](https://github.com/bojosos/ptpng/actions/runs/38931650041) | Reject. Initial Windows photo gains fail to repeat: RGBA16 photo becomes 0.973x and graphics 0.888–0.913x. |
+| Pair match length and distance writer updates | [38930510964](https://github.com/bojosos/ptpng/actions/runs/38930510964) | Leave experimental. Windows x64 RGB-photo encoding improves 2.1%, but Linux x64 RGBA16 and macOS Gray16 regress. |
+
+The checksum trial passes 31,728 independent checksum cases and
+[730,834 sanitizer fuzz executions](https://github.com/bojosos/ptpng/actions/runs/38929995754).
+The CRC helper already inlines in MSVC; its apparent VTune helper calls are
+inline-frame attribution. Both encoder trials preserve exact bytes for
+2,108 raw streams and eleven PNGs, including the portable bit writer.
+The literal repeat's disabled-platform executables or text sections match
+baseline exactly. Its Windows x64 baseline and candidate code also match
+their respective original-run code. The first run uses EPYC 9V74, while
+the repeat uses EPYC 7763: hardware-dependent behavior is plausible, and
+the first apparent gain is insufficient for a general MSVC x64 selection.
+
 ## 15 October continued investigation
 
 The [refreshed nightly](https://github.com/bojosos/ptpng/actions/runs/38757881206)
