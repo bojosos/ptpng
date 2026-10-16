@@ -185,8 +185,8 @@ void ptpng_filter_paeth_avx2(uint8_t *dst, const uint8_t *src,
                 s = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(src + i)));
                 lo = _mm_min_epi16(a, b);
                 hi = _mm_max_epi16(a, b);
-                threshold = _mm_sub_epi16(_mm_add_epi16(c, _mm_slli_epi16(c, 1)),
-                                          _mm_add_epi16(a, b));
+                threshold = _mm_sub_epi16(_mm_sub_epi16(
+                    _mm_add_epi16(c, _mm_slli_epi16(c, 1)), b), a);
                 predictor = _mm_blendv_epi8(hi, c, _mm_cmpgt_epi16(threshold, lo));
                 predictor = _mm_blendv_epi8(lo, predictor, _mm_cmpgt_epi16(hi, threshold));
                 a = _mm_and_si128(_mm_add_epi16(s, predictor), mask);
@@ -209,8 +209,9 @@ void ptpng_filter_paeth_avx2(uint8_t *dst, const uint8_t *src,
         hi = _mm_max_epi16(a, b);
         /* Values span -510..765, safely inside signed 16-bit lanes.
          * Threshold equality must select a or b, never c. */
-        threshold = _mm_sub_epi16(_mm_add_epi16(c, _mm_slli_epi16(c, 1)),
-                                  _mm_add_epi16(a, b));
+        /* Finish the terms independent of the preceding decoded pixel first. */
+        threshold = _mm_sub_epi16(_mm_sub_epi16(
+            _mm_add_epi16(c, _mm_slli_epi16(c, 1)), b), a);
         predictor = _mm_blendv_epi8(hi, c, _mm_cmpgt_epi16(threshold, lo));
         predictor = _mm_blendv_epi8(lo, predictor, _mm_cmpgt_epi16(hi, threshold));
         a = _mm_and_si128(_mm_add_epi16(s, predictor), mask);
