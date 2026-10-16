@@ -63,6 +63,12 @@ offset 44 to offset 60 within a 64-byte cache line, crossing the boundary
 immediately. This is a plausible placement effect, not a proven cause of
 the entire loss. A revised caller branches directly to unfiltering after
 stored success and preserves the original general-inflate block verbatim.
+Its [full comparison](https://github.com/bojosos/ptpng/actions/runs/38932126120)
+restores Linux ARM64 Gray8 to 1.000x and improves RGBA8 to 0.994x, while
+native noise remains 2.278x. Some other small losses remain. This universal
+caller also regresses Windows x64 graphics encoding on the next runner,
+so the retained stored shortcut is selected only on Linux. The disabled
+Windows caller and inflater restore byte-identical local executable text.
 
 Eight local C/C++ tests pass. New public-decoder regressions cover every
 two-way split, empty IDAT chunks, nonzero stored padding, mixed stored/fixed
@@ -78,6 +84,45 @@ Seven additional stored PNG seeds keep fragmented decoding reachable in
 future fuzz campaigns, with independent zlib checks on their raw pixels.
 The [seeded campaign](https://github.com/bojosos/ptpng/actions/runs/38931237302)
 passes another 1,248,123 executions.
+
+### Hoist the literal-batch bit guard on Linux ARM64
+
+The existing batch decodes up to four root-table literals. A single guard
+requiring at least four times the ten-bit root width proves that all four
+literal code lengths fit. Three subsequent bit-count comparisons become
+redundant. The batch width, Huffman tables, output checks, refill before
+matches and checked short-tail path are preserved.
+
+The [universal trial](https://github.com/bojosos/ptpng/actions/runs/38931650137)
+has Linux x64 and Windows ARM64 regressions. Windows x64 noise-to-RGB
+initially improves 1.014x, but the
+[nine-pair repeat](https://github.com/bojosos/ptpng/actions/runs/38932584216)
+does not confirm it: native noise becomes 0.996x with every pair slower.
+The two Windows runs use EPYC 9V45 and 9V74 with identical respective
+baseline/candidate executable text. Windows therefore retains the original
+loop. Linux GCC AArch64 repeats RGBA8-photo decode at 1.013x
+(1.012–1.014x), RGBA16 photo at 1.016x (1.013–1.018x), and RGBA8-to-RGB
+at 1.013x (1.010–1.015x); every pair improves in all three cases.
+
+The retained guard selects only Linux GCC AArch64. Other compilers retain
+the original conditions verbatim. The loop passes six core tests, 22,572
+valid/truncated/mutated stream comparisons and independent zlib checks.
+The universally enabled loop also passes
+[707,423 sanitizer executions](https://github.com/bojosos/ptpng/actions/runs/38931655076),
+including Clang builds before the compiler selection was narrowed.
+
+### Combined final-source validation
+
+Source `fdc6187` combines the Linux stored shortcut and Linux GCC AArch64
+batch guard on top of `f698c88`. The complete comparison uses seven
+alternating half-second pairs for all 23 workloads on each platform:
+[paired results](https://github.com/bojosos/ptpng/actions/runs/38933419955).
+Matching source validation is recorded in the
+[CI run](https://github.com/bojosos/ptpng/actions/runs/38933427114) and
+[seeded sanitizer campaigns](https://github.com/bojosos/ptpng/actions/runs/38933433085).
+Windows and macOS retain their original decoder code paths. These results
+cover the measured fixtures and hosted CPUs, rather than arbitrary inputs
+or every compiler and processor.
 
 ### Other isolated trials
 
