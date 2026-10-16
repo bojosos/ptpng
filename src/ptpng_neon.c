@@ -93,7 +93,7 @@ PTPNG_API_INLINE uint16x8_t paeth_pixel_neon(uint16x8_t s, uint16x8_t a,
 
 #if defined(__linux__) && defined(__aarch64__) && defined(__GNUC__) && \
     !defined(__clang__)
-static int paeth_row_is_zero(const uint8_t *src, size_t count)
+PTPNG_API_INLINE int paeth_row_is_zero(const uint8_t *src, size_t count)
 {
     size_t i = 0;
     /* Reject ordinary photo rows after one load. Flat rows amortize the
@@ -115,9 +115,10 @@ static int paeth_row_is_zero(const uint8_t *src, size_t count)
 }
 #endif
 
-/* Clang uses a separate stride-selection wrapper. MSVC keeps the
- * original kernel and direct dispatch to avoid an eight-byte regression. */
-#if defined(__clang__)
+/* Keep zero-row dispatch separate from the established predictor loops.
+ * Clang also uses a separate stride-selection wrapper. */
+#if defined(__clang__) || (defined(__linux__) && defined(__aarch64__) && \
+                          defined(__GNUC__))
 __attribute__((noinline))
 #endif
 static void ptpng_filter_paeth_neon(uint8_t *dst, const uint8_t *src,
@@ -126,15 +127,6 @@ static void ptpng_filter_paeth_neon(uint8_t *dst, const uint8_t *src,
 {
     size_t i = 0;
     uint16x8_t a = vdupq_n_u16(0), c = vdupq_n_u16(0);
-#if defined(__linux__) && defined(__aarch64__) && defined(__GNUC__) && \
-    !defined(__clang__)
-    /* Zero residuals preserve the previous row: after the first pixel,
-     * decoded-left equals upper-left and Paeth therefore selects above. */
-    if (bpp == 8 && paeth_row_is_zero(src, count)) {
-        memmove(dst, prev, count);
-        return;
-    }
-#endif
 #if defined(__GNUC__) && !defined(__clang__)
     /* Preserve the measured GCC layout: four-byte pixels branch to the
      * shared tail, while eight-byte pixels reach their loop directly. */
@@ -192,6 +184,23 @@ tail:
         dst[i] = (uint8_t)(src[i] + predictor);
     }
 }
+
+#if defined(__linux__) && defined(__aarch64__) && defined(__GNUC__) && \
+    !defined(__clang__)
+/* A separate subsection retains the normal kernel's measured placement. */
+__attribute__((section(".text.ptpng_zero_paeth")))
+static void ptpng_filter_paeth_neon_zero_dispatch(uint8_t *dst, const uint8_t *src,
+                                                  const uint8_t *prev, size_t count,
+                                                  unsigned bpp)
+{
+    /* Zero residuals preserve the previous row: after the first pixel,
+     * decoded-left equals upper-left and Paeth therefore selects above. */
+    if (bpp == 8 && paeth_row_is_zero(src, count))
+        memmove(dst, prev, count);
+    else
+        ptpng_filter_paeth_neon(dst, src, prev, count, bpp);
+}
+#endif
 
 #if defined(__clang__)
 static void ptpng_filter_paeth_neon_dispatch(uint8_t *dst, const uint8_t *src,
@@ -558,7 +567,10 @@ void ptpng_neon_init(void)
     ptpng_cpu.filter_sub = ptpng_filter_sub_neon;
     ptpng_cpu.adler32 = ptpng_adler32_neon;
     ptpng_cpu.filter_up = ptpng_filter_up_neon;
-#if defined(__clang__)
+#if defined(__linux__) && defined(__aarch64__) && defined(__GNUC__) && \
+    !defined(__clang__)
+    ptpng_cpu.filter_paeth = ptpng_filter_paeth_neon_zero_dispatch;
+#elif defined(__clang__)
     ptpng_cpu.filter_paeth = ptpng_filter_paeth_neon_dispatch;
 #else
     ptpng_cpu.filter_paeth = ptpng_filter_paeth_neon;
