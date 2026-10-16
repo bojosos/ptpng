@@ -37,9 +37,9 @@ PTPNG_API_INLINE unsigned deflate_reverse8(unsigned value)
            deflate_reverse4[(value >> 4) & 15];
 }
 
-/* count is at most 31. The word-store writer keeps fewer than eight pending
- * bits; the portable writer keeps fewer than 32. */
-PTPNG_API_INLINE int deflate_put(deflate_writer *w, uint32_t value,
+/* count is at most 48 for word stores and 31 for the portable writer. The
+ * writers retain fewer than eight and 32 pending bits, respectively. */
+PTPNG_API_INLINE int deflate_put(deflate_writer *w, uint64_t value,
                                  unsigned count)
 {
     w->bits |= (uint64_t)value << w->count;
@@ -723,14 +723,26 @@ static int deflate_emit_tokens(deflate_writer *w, const deflate_token *tokens,
             unsigned ls = len_symbol[value], ds = deflate_dist_symbol(distance);
             uint32_t code = lit_codes[257 + ls];
             unsigned bits = code >> 16;
-            if (!deflate_put(w, (code & 65535) |
-                               ((value - deflate_len_base[ls]) << bits),
-                             bits + deflate_len_extra[ls])) return 0;
+            uint32_t length_value = (code & 65535) |
+                                   ((value - deflate_len_base[ls]) << bits);
+            unsigned length_bits = bits + deflate_len_extra[ls];
+            uint32_t distance_value;
+            unsigned distance_bits;
             code = dist_codes[ds];
             bits = code >> 16;
-            if (!deflate_put(w, (code & 65535) |
-                               ((distance - deflate_dist_base[ds]) << bits),
-                             bits + (ds < 4 ? 0 : (ds >> 1) - 1))) return 0;
+            distance_value = (code & 65535) |
+                             ((distance - deflate_dist_base[ds]) << bits);
+            distance_bits = bits + (ds < 4 ? 0 : (ds >> 1) - 1);
+#if PTPNG_DEFLATE_WORD_STORE
+            /* Length and distance use at most 20 + 28 bits. Together with
+             * fewer than eight pending bits, the pair fits in one word. */
+            if (!deflate_put(w, length_value |
+                               ((uint64_t)distance_value << length_bits),
+                             length_bits + distance_bits)) return 0;
+#else
+            if (!deflate_put(w, length_value, length_bits) ||
+                !deflate_put(w, distance_value, distance_bits)) return 0;
+#endif
         }
     }
     return deflate_code(w, lit_codes[256]);
