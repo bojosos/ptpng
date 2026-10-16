@@ -120,7 +120,31 @@ alternating half-second pairs for all 23 workloads on each platform:
 Matching source validation is recorded in the
 [CI run](https://github.com/bojosos/ptpng/actions/runs/38933427114) and
 [seeded sanitizer campaigns](https://github.com/bojosos/ptpng/actions/runs/38933433085).
-Windows and macOS retain their original decoder code paths. These results
+All eight CI jobs and both sanitizer jobs pass; the campaigns complete
+1,456,927 executions. All 805 paired input/decoded/output size tuples match.
+Median candidate/baseline throughput ratios are:
+
+| Workload | Linux x64 | Linux ARM64 |
+| --- | ---: | ---: |
+| Noise native decode | 3.187x | 2.266x |
+| Noise to RGB8 | 2.988x | 2.196x |
+| Gray8 photo decode | 0.990x | 1.020x |
+| RGBA8 photo decode | 0.989x | 1.007x |
+| RGBA16 photo decode | 0.989x | 1.011x |
+| RGBA16 graphics decode | 1.002x | 0.985x |
+| Decode geometric mean, 14 paired workloads | 1.171x | 1.123x |
+| Encode geometric mean, nine images | 0.997x | 1.006x |
+
+The remaining tradeoffs are explicit: Linux x64 RGBA8/Gray8/RGBA16 photo
+decode and RGBA8-to-RGB lose about 1.0–1.1% in every pair, and Gray16-photo
+encoding loses 1.4%. Linux ARM64 RGBA16 graphics decode loses 1.5% in every
+pair. The large noise gain outweighs these losses in the measured decode
+geometric means; the patch does not improve every workload.
+
+Windows and macOS retain their original decoder code paths. The final
+macOS executable text matches baseline byte-for-byte. Linux x64 text also
+matches the previous caller-only source, confirming that the disabled
+ARM literal guard introduces no x64 code or placement change. These results
 cover the measured fixtures and hosted CPUs, rather than arbitrary inputs
 or every compiler and processor.
 
