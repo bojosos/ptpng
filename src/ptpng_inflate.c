@@ -704,6 +704,7 @@ int ptpng_inflate_dyn(const uint8_t *in, size_t in_len, size_t max_out,
     return PTPNG_OK;
 }
 
+#if defined(__linux__)
 PTPNG_API_INLINE int stored_byte(const struct ptpng_inflate_chunk *chunks,
                                  size_t count, size_t *index, size_t *offset,
                                  uint8_t *byte)
@@ -769,3 +770,4 @@ int ptpng_try_inflate_stored(const struct ptpng_inflate_chunk *chunks,
     if (!(flags & PTPNG_INF_NO_ADLER) && ptpng_adler32(out, out_len) != want) return 0;
     return 1;
 }
+#endif

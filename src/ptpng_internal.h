@@ -64,11 +64,13 @@ int ptpng_inflate_dyn(const uint8_t *in, size_t in_len, size_t max_out,
                       uint8_t **out, size_t *out_len);
 
 struct ptpng_inflate_chunk { const uint8_t *p; size_t len; };
+#if defined(__linux__)
 /* Returns one only for a complete, validated all-stored stream. Otherwise
  * the caller must use the general inflater; partial output is disposable. */
 int ptpng_try_inflate_stored(const struct ptpng_inflate_chunk *chunks,
                               size_t count, uint8_t *out, size_t out_len,
                               uint32_t flags);
+#endif
 
 /* ---- filters ---------------------------------------------------------
  * Reconstruct one scanline from the filtered bytes, writing the final
