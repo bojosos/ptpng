@@ -97,10 +97,12 @@ jobs:
             os: ubuntu-latest
             cc: clang
             cxx: clang++
+            defines: -DINFLATE_FIXED_WIDTH_BATCH=1
           - name: linux-arm64-gcc-asan-ubsan
             os: ubuntu-24.04-arm
             cc: gcc
             cxx: g++
+            defines: ''
     runs-on: ${{ matrix.os }}
     env:
       CC: ${{ matrix.cc }}
@@ -113,7 +115,7 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           -DPTPNG_WITH_LIBPNG=OFF
           -DPTPNG_BUILD_CPP_TESTS=ON
-          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          -DCMAKE_C_FLAGS="${{ matrix.defines }} -fsanitize=address,undefined -fno-omit-frame-pointer -g"
           -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
