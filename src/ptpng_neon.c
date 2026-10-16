@@ -81,9 +81,17 @@ PTPNG_API_INLINE uint16x8_t paeth_pixel_neon(uint16x8_t s, uint16x8_t a,
 {
     int16x8_t lo = vreinterpretq_s16_u16(vminq_u16(a, b));
     int16x8_t hi = vreinterpretq_s16_u16(vmaxq_u16(a, b));
-    int16x8_t threshold = vsubq_s16(
+    int16x8_t threshold;
+#if defined(__linux__) && defined(__aarch64__) && defined(__GNUC__) && \
+    !defined(__clang__)
+    /* Compute the independent upper-row terms before the decoded-left value. */
+    threshold = vreinterpretq_s16_u16(vsubq_u16(vsubq_u16(
+        vaddq_u16(c, vshlq_n_u16(c, 1)), b), a));
+#else
+    threshold = vsubq_s16(
         vreinterpretq_s16_u16(vaddq_u16(c, vshlq_n_u16(c, 1))),
         vreinterpretq_s16_u16(vaddq_u16(a, b)));
+#endif
     uint16x8_t predictor = vbslq_u16(vcgtq_s16(threshold, lo), c,
                                     vreinterpretq_u16_s16(hi));
     predictor = vbslq_u16(vcgtq_s16(hi, threshold), predictor,
