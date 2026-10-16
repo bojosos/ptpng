@@ -791,8 +791,10 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
     unsigned depth = 0, ct = 0, interlace = 0;
     int have_ihdr = 0, have_iend = 0, idat_state = 0; /* 0 none, 1 in, 2 done */
     size_t idat_total = 0;
+#if !defined(__linux__)
     const uint8_t *idat_first = NULL;
     uint8_t *idat_buf = NULL;
+#endif
     struct ptpng_inflate_chunk *idat_refs = NULL;
     size_t n_idat_refs = 0, cap_idat_refs = 0;
     int rc;
@@ -1332,16 +1334,12 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
     }
 #if defined(__linux__)
     if (prof) P2 = pt_tsc();
-    /* Stored streams can copy straight from fragmented IDAT payloads.
-     * Everything else retains the general inflater and its error handling. */
-    if (n_idat_refs > 1 &&
-        ptpng_try_inflate_stored(idat_refs, n_idat_refs, raw, (size_t)raw_size,
-            (opts->flags & PTPNG_FLAG_NO_VERIFY_ADLER) ? PTPNG_INF_NO_ADLER : 0)) {
-        free(idat_refs);
-        idat_refs = NULL;
-        goto inflated;
-    }
-#endif
+    rc = ptpng_inflate_chunks(idat_refs, n_idat_refs, idat_total, raw,
+        (size_t)raw_size,
+        (opts->flags & PTPNG_FLAG_NO_VERIFY_ADLER) ? PTPNG_INF_NO_ADLER : 0);
+    free(idat_refs);
+    idat_refs = NULL;
+#else
     if (n_idat_refs == 1) {
         idat_first = idat_refs[0].p;
     } else if (n_idat_refs > 1) {
@@ -1360,22 +1358,22 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
     free(idat_refs);
     idat_refs = NULL;
     if (prof) P2 = pt_tsc();
+#endif
 
     {
+#if !defined(__linux__)
         const uint8_t *zin = idat_buf ? idat_buf : idat_first;
         uint32_t ifl = (opts->flags & PTPNG_FLAG_NO_VERIFY_ADLER)
                            ? PTPNG_INF_NO_ADLER : 0;
         rc = ptpng_inflate(zin ? zin : (const uint8_t *)"", idat_total, raw,
                            (size_t)raw_size, ifl);
         free(idat_buf);
+#endif
         if (rc) {
             free(raw); free(zeros);
             ptpng_info_free(&linfo);
             return rc;
         }
-#if defined(__linux__)
-inflated:
-#endif
         if (getenv("PTPNG_DUMP_RAW")) {
             FILE *df = fopen(getenv("PTPNG_DUMP_RAW"), "wb");
             if (df) { fwrite(raw, 1, (size_t)raw_size, df); fclose(df); }

@@ -14,7 +14,8 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<0:>")
 
 # ---- the library -------------------------------------------------------
 set(PTPNG_SOURCES src/ptpng.c src/ptpng_inflate.c src/ptpng_crc.c
-                  src/ptpng_filters.c src/ptpng_encode.c src/ptpng_deflate.c)
+                  src/ptpng_filters.c src/ptpng_encode.c src/ptpng_deflate.c
+                  src/ptpng_idat.c)
 
 set(PTPNG_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
 if(CMAKE_GENERATOR_PLATFORM)
