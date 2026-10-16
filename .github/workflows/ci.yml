@@ -88,11 +88,23 @@ jobs:
         shell: bash
 
   sanitize:
-    name: linux-x64-asan-ubsan
-    runs-on: ubuntu-latest
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64-asan-ubsan
+            os: ubuntu-latest
+            cc: clang
+            cxx: clang++
+          - name: linux-arm64-gcc-asan-ubsan
+            os: ubuntu-24.04-arm
+            cc: gcc
+            cxx: g++
+    runs-on: ${{ matrix.os }}
     env:
-      CC: clang
-      CXX: clang++
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
     steps:
       - uses: actions/checkout@v4
 
