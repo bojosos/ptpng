@@ -113,7 +113,7 @@ fail:
 static int check_full(int kind, const char *name, unsigned bpp)
 {
     size_t counts[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63,
-                       64, 65, 100, 127, 128, 129, 255, 256, 257, 511,
+                       64, 65, 80, 81, 100, 127, 128, 129, 144, 145, 255, 256, 257, 511,
                        512, 513, 767, 768, 769, 1023, 1024, 2048, 4096};
     unsigned c, i;
     size_t k;
@@ -166,6 +166,27 @@ static int check_full(int kind, const char *name, unsigned bpp)
         /* Dispatch exercises NEON on ARM and the selected x86 path. */
         if (kind == 4 && check_kernel(ptpng_cpu.filter_paeth,
                                       "dispatched paeth", bpp, count)) return 1;
+        if (kind == 4) {
+            /* A zero Paeth row copies above. A nonzero final residual must
+             * still be found after any long zero prefix or vector tail. */
+            memset(src, 0, count);
+            memcpy(ref, prev, count);
+            if (check_kernel(ptpng_cpu.filter_paeth, "zero paeth", bpp, count)) return 1;
+            if (count) {
+                src[count - 1] = 1;
+                ref[count - 1] = (uint8_t)(prev[count - 1] + 1);
+                if (check_kernel(ptpng_cpu.filter_paeth, "zero prefix paeth", bpp, count)) return 1;
+            }
+            if (bpp == 8 && count == 80) {
+                /* Reject a nonzero in each vector of the four-load scan. */
+                for (i = 16; i <= 64; i += 16) {
+                    memset(src, 0, count);
+                    src[i] = 1;
+                    ptpng_filter_paeth_scalar(ref, src, prev, count, bpp);
+                    if (check_kernel(ptpng_cpu.filter_paeth, "late nonzero paeth", bpp, count)) return 1;
+                }
+            }
+        }
         if (kind == 1 || kind == 2) {
             ptpng_filter_fn fn = kind == 1 ? ptpng_cpu.filter_sub : ptpng_cpu.filter_up;
             if (check_kernel(fn, "dispatched", bpp, count)) return 1;

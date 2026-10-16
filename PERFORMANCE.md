@@ -4,6 +4,142 @@ ptpng targets fast single-threaded PNG decoding on x86 AVX2 and ARM64
 NEON. A kernel benchmark measures one operation; it does not establish
 the speed of a complete PNG decode or a lead over every other decoder.
 
+## 16 October follow-up experiments
+
+This round compares against main `db34161`, which already includes the
+fragmented stored-stream shortcut below. Local measurements screen ideas;
+acceptance uses alternating baseline/candidate measurements on GitHub
+machines. Earlier laptop measurements made on battery are not acceptance
+evidence.
+
+The retained change copies zero-residual Paeth rows on Linux GCC ARM64.
+The Windows fixed-literal experiment is held because its final comparison
+repeats a substantial graphics encoding regression on EPYC 7763.
+
+### Windows x64 fixed-literal experiment (held)
+
+The Windows noise fixture contains two fixed-Huffman blocks. Its
+3,319,878 compressed bytes and Linux's 3,147,615-byte stored-block input
+inflate independently with zlib to the same 3,146,496 filtered bytes
+(SHA-256 `e3da8405bdc2fcf1874758c4d99d9390e21d400064c28c5dac59d213e080a63b`).
+The Windows bottleneck is therefore different from Linux's stored-stream
+copying cost.
+
+Fixed literal widths can be derived from five low bits before the decode
+table returns the literal byte. The new four-literal batch retains the
+table's literal classification, requires 36 available bits for four
+nine-bit codes, and preserves the existing output-capacity check. A
+nonliteral returns to checked decoding without consuming its bits;
+previous literals in the batch have already been committed. Dynamic
+blocks and short tails retain the established decoder. The trial selects
+only native MSVC x64.
+
+The [five-pair screen](https://github.com/bojosos/ptpng/actions/runs/38936495592)
+on EPYC 7763 confirms native noise at 1.401x (1.352–1.417x) and noise to
+RGB8 at 1.401x (1.360–1.419x). The
+[nine-pair half-second repeat](https://github.com/bojosos/ptpng/actions/runs/38937169874)
+on EPYC 9V45 confirms 1.492x (1.441–1.518x) and 1.490x
+(1.372–1.567x), respectively. Every pair improves in both runs, and each
+version's executable text is identical across the two machines.
+
+There is a repeated tradeoff: Gray16-photo decoding is 0.979x in the
+screen and 0.988x in the repeat, with every pair slower. That input has
+61 dynamic blocks and no fixed blocks. Palette and RGBA16-graphics
+encoding losses around 11% in the first screen do not repeat on the
+second CPU; the repeat's graphics encoding ranges cross parity. These
+controls still belong in the full combined comparison.
+
+The [final seven-pair half-second comparison](https://github.com/bojosos/ptpng/actions/runs/38939461640)
+returns to EPYC 7763 with the same executable text. Native noise improves
+1.405x (1.302–1.542x), and noise to RGB8 improves 1.397x
+(1.240–1.510x), but palette/RGB/RGBA16 graphics encoding falls to
+0.906x/0.893x/0.886x with every pair slower. Gray8-photo decoding also
+loses 2.1% in every pair. The 14-case decode mean is 1.026x, while the
+nine-image encode mean is 0.962x. The encoding losses therefore repeat
+on the original CPU and cannot be dismissed as timing noise. The
+fixed-literal change and its compiler-selection overrides are excluded
+from the retained ARM patch.
+
+### Copy zero Paeth residual rows on Linux ARM64
+
+For an all-zero Paeth residual row, reconstruction equals the previous
+row: the first pixel selects above, then decoded-left equals upper-left,
+so subsequent predictions select above as well. The RGBA16 graphics
+fixture has 734 qualifying rows among its 768 Paeth rows. A bounded NEON
+scan proves that the complete residual row is zero before copying the
+previous row. A nonzero first vector rejects ordinary photo rows quickly.
+The scan handles exact tails and overlapping source/output safely because
+it completes before writing.
+
+The shortcut selects only Linux GCC AArch64 and eight-byte pixels. A
+separate dispatch wrapper keeps the existing predictor body and measured
+placement intact. Windows, macOS and other compiler paths retain their
+existing code. The first version placed the scan inside the kernel and
+slowed ordinary rows slightly; the isolated wrapper removes those losses.
+
+The [full nine-pair half-second confirmation](https://github.com/bojosos/ptpng/actions/runs/38937520542)
+matches all 1,035 input/decoded/output size tuples. RGBA16 graphics
+decoding improves 4.014x (3.980–4.034x), with every pair faster. RGBA8 and
+RGBA16 photo decoding are 1.016x and 1.003x, Gray8 is 1.000x, and noise
+is 1.002x (0.997–1.004x). No ARM decode workload loses in every pair;
+the 14-case decode geometric mean is 1.107x. The four disabled platforms
+have identical baseline/candidate executable code, despite timing noise.
+
+The final seven-pair comparison above repeats the ARM graphics gain at
+4.041x (4.022–4.070x). RGBA8 and RGBA16 photo decode improve 1.017x
+and 1.004x; the decode mean is 1.109x and the encode mean is 0.999x.
+No ARM workload loses in every pair. All 805 paired size tuples across
+five platforms match. This cross-check includes the subsequently held
+Windows experiment; its Linux ARM64 executable is identical to the
+ARM-only confirmation. The retained source keeps Windows unchanged.
+
+### Rejected alternatives
+
+These experiments remain outside the retained source. Initial full
+screens use five alternating 0.3-second pairs on all five platforms;
+confirmations use nine half-second pairs.
+
+| Trial | Hosted evidence | Decision |
+| --- | --- | --- |
+| Pack four Windows literal stores into one word | [38936041157](https://github.com/bojosos/ptpng/actions/runs/38936041157) | Reject. Native noise is 1.005x with a 0.907–1.007x range; Gray16 decode loses 1.1% in every pair. Added packing instructions do not establish a reliable gain. |
+| Reassociate NEON Paeth arithmetic | [38935767854](https://github.com/bojosos/ptpng/actions/runs/38935767854) | Reject. Linux ARM64 RGBA16 graphics decoding falls to 0.918x; the compiler adds a serial arithmetic operation. |
+| Isolate Linux IDAT materialization in a separate helper | [38936179431](https://github.com/bojosos/ptpng/actions/runs/38936179431) | Reject. Linux x64 target photo cases stay near parity; Linux ARM64 Gray8/Gray16 photos develop repeatable losses. |
+| Align the Linux GCC x64 inflater to 64 bytes | [38936941309](https://github.com/bojosos/ptpng/actions/runs/38936941309) | Reject. Photo gains of 0.9–1.3% on EPYC 7763 accompany graphics encoding ratios of 0.847–0.855x. |
+| Also align Linux GCC x64 compression to 32 bytes | [screen](https://github.com/bojosos/ptpng/actions/runs/38937803489), [confirmation](https://github.com/bojosos/ptpng/actions/runs/38938564459) | Reject. The Xeon 8573C screen recovers encoding, but EPYC 9V45 repeats RGB/Gray16-photo decode at 0.970x/0.961x with every pair slower. Each executable is byte-identical across runs, so the result depends on the measured CPU rather than build drift. |
+
+The remaining small Linux x64 photo and Gray16-encoding losses recorded
+below are unresolved. Restoring a previous instruction alignment is not
+sufficient evidence of a portable speedup.
+
+### Correctness coverage
+
+The fixed-code change passes 22,572 valid, truncated and mutated stream
+comparisons against the baseline and independent zlib checks, including
+the actual Windows noise fixture. Regression tests independently encode
+all 256 literal values at each batch position. Existing tests exercise
+partial-batch EOB, reserved symbols, matches, exact output capacities and
+every truncated input prefix. Native MSVC AddressSanitizer also passes
+10,000 additional mutations of a fixed-code PNG.
+
+Paeth regressions compare the selected kernel with scalar reconstruction
+at row-length boundaries from zero through 4,096 bytes, all 16 alignments,
+six source/output overlap gaps and exact allocations. They include zero
+rows, late nonzero tails, and a nonzero in each of the four vectors after
+the initial zero prefix. The new Linux GCC ARM64 ASan/UBSan CI job exercises
+the actual production shortcut. During the Windows experiment, Clang x64
+sanitizer and fuzz jobs explicitly enabled the fixed-code batch so the
+compiler guard could not hide that algorithm from those checks. Those
+overrides are held with the Windows trial.
+
+The [combined-source sanitizer campaigns](https://github.com/bojosos/ptpng/actions/runs/38938683343)
+complete 1,304,062 executions across eight campaigns without failure.
+Eight local C/C++ tests also pass after the late-vector regression cases
+are added. The retained ARM library source matches the ARM-only
+confirmation; the later additions only strengthen its tests and CI.
+The final ARM-only checks are recorded in the
+[nine-job CI run](https://github.com/bojosos/ptpng/actions/runs/38940484598)
+and [sanitizer campaigns](https://github.com/bojosos/ptpng/actions/runs/38940552379).
+
 ## 16 October nightly investigation
 
 The [nightly on `f698c88`](https://github.com/bojosos/ptpng/actions/runs/38869992861)
