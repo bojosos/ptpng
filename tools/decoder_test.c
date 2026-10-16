@@ -562,6 +562,35 @@ static void test_literal_boundaries(void)
     }
 }
 
+static void test_fixed_literal_codes(void)
+{
+    unsigned prefix;
+    /* Every fixed literal code, at every position within a four-byte batch.
+     * Spare output capacity also exercises EOB after a partial batch. */
+    for (prefix = 0; prefix < 4; ++prefix) {
+        unsigned char zs[320] = {0x78,0x01}, expected[259];
+        unsigned char *out = NULL;
+        unsigned size = prefix + 256, bit = 16, i;
+        unsigned long a = 1, b = 0;
+        size_t n, out_len = 0;
+        put_bits(zs, &bit, 3, 3);
+        for (i = 0; i < prefix; ++i) expected[i] = (unsigned char)(i & 1 ? 255 : 0);
+        for (i = 0; i < 256; ++i) expected[prefix + i] = (unsigned char)i;
+        for (i = 0; i < size; ++i) {
+            fixed_symbol(zs, &bit, expected[i]);
+            a += expected[i]; b += a;
+        }
+        fixed_symbol(zs, &bit, 256);
+        n = (bit + 7) / 8;
+        be32(zs + n, ((b % 65521) << 16) | (a % 65521));
+        n += 4;
+        CHECK(ptpng_inflate_dyn(zs, n, size + 8, &out, &out_len) == PTPNG_OK);
+        CHECK(out && out_len == size);
+        if (out) CHECK(memcmp(out, expected, size) == 0);
+        free(out);
+    }
+}
+
 static void test_match_copies(void)
 {
     static const unsigned bases[] = {3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,
@@ -623,6 +652,7 @@ int main(void)
     test_mixed_blocks();
     test_fragmented_stored_blocks();
     test_literal_boundaries();
+    test_fixed_literal_codes();
     test_match_copies();
     if (failures) return 1;
     puts("decoder: metadata, limits, and malformed chunk regressions OK");
