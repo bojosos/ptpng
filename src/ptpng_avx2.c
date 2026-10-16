@@ -508,29 +508,36 @@ static uint32_t adler32_avx2(const uint8_t *p, size_t n)
     const __m256i weights = _mm256_setr_epi8(
         32,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,
         16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1);
+    const __m256i weights_hi = _mm256_setr_epi8(
+        64,63,62,61,60,59,58,57,56,55,54,53,52,51,50,49,
+        48,47,46,45,44,43,42,41,40,39,38,37,36,35,34,33);
     uint32_t a = 1, b = 0;
 
-    while (n >= 32) {
-        unsigned chunk = (unsigned)(n < 4096 ? n : 4096) & ~31u;
+    while (n >= 64) {
+        unsigned chunk = (unsigned)(n < 4096 ? n : 4096) & ~63u;
         __m256i sum = zero, prefix = zero, weighted = zero;
         uint64_t sums[4], prefixes[4];
         uint32_t terms[8], s = 0, w = 0;
         unsigned i;
-        for (i = 0; i < chunk; i += 32) {
-            __m256i bytes = _mm256_loadu_si256((const __m256i *)(p + i));
+        for (i = 0; i < chunk; i += 64) {
+            __m256i lo = _mm256_loadu_si256((const __m256i *)(p + i));
+            __m256i hi = _mm256_loadu_si256((const __m256i *)(p + i + 32));
             prefix = _mm256_add_epi64(prefix, sum);
-            sum = _mm256_add_epi64(sum, _mm256_sad_epu8(bytes, zero));
-            /* Adjacent weighted bytes sum to at most 255*(32+31),
+            sum = _mm256_add_epi64(sum, _mm256_add_epi64(
+                _mm256_sad_epu8(lo, zero), _mm256_sad_epu8(hi, zero)));
+            /* Adjacent weighted bytes sum to at most 255*(64+63),
              * so the signed saturating multiply-add cannot saturate. */
             weighted = _mm256_add_epi32(weighted, _mm256_madd_epi16(
-                _mm256_maddubs_epi16(bytes, weights), ones));
+                _mm256_maddubs_epi16(lo, weights_hi), ones));
+            weighted = _mm256_add_epi32(weighted, _mm256_madd_epi16(
+                _mm256_maddubs_epi16(hi, weights), ones));
         }
         _mm256_storeu_si256((__m256i *)sums, sum);
         _mm256_storeu_si256((__m256i *)prefixes, prefix);
         _mm256_storeu_si256((__m256i *)terms, weighted);
         for (i = 0; i < 4; i++) {
             s += (uint32_t)sums[i];
-            w += 32u * (uint32_t)prefixes[i];
+            w += 64u * (uint32_t)prefixes[i];
         }
         for (i = 0; i < 8; i++) w += terms[i];
         /* 4096*65520 + 255*4096*4097/2 + 65520 < 2^32. */
@@ -538,6 +545,23 @@ static uint32_t adler32_avx2(const uint8_t *p, size_t n)
         a = (a + s) % 65521u;
         p += chunk;
         n -= chunk;
+    }
+    if (n >= 32) {
+        __m256i bytes = _mm256_loadu_si256((const __m256i *)p);
+        __m256i sum = _mm256_sad_epu8(bytes, zero);
+        __m256i weighted = _mm256_madd_epi16(
+            _mm256_maddubs_epi16(bytes, weights), ones);
+        uint64_t sums[4];
+        uint32_t terms[8], s = 0, w = 0;
+        unsigned i;
+        _mm256_storeu_si256((__m256i *)sums, sum);
+        _mm256_storeu_si256((__m256i *)terms, weighted);
+        for (i = 0; i < 4; ++i) s += (uint32_t)sums[i];
+        for (i = 0; i < 8; ++i) w += terms[i];
+        b += 32u * a + w;
+        a += s;
+        p += 32;
+        n -= 32;
     }
     while (n--) {
         a += *p++;

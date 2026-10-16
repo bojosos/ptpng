@@ -87,7 +87,8 @@ int main(void)
     for (i = 0; i < 32; i++) {
         static const size_t lengths[] = {0,1,7,8,15,16,17,31,32,33,63,64,65,
                                         127,128,129,255,256,257,511,512,513,
-                                        2047,2048,2049,4095,4096,4097,8191,8192,8193};
+                                        2047,2048,2049,4095,4096,4097,4127,4128,
+                                        4159,4160,8191,8192,8193};
         for (j = 0; j < sizeof(lengths) / sizeof(lengths[0]); j++) {
             size_t n = lengths[j], k;
             uint8_t *allocation = (uint8_t *)malloc(n + i ? n + i : 1);
