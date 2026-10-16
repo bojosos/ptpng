@@ -30,6 +30,11 @@
 #else
 #define INFLATE_BATCH_BIT_GUARD 0
 #endif
+#if defined(_MSC_VER) && defined(_M_X64) && !defined(__clang__)
+#define INFLATE_PACKED_LITERALS 1
+#else
+#define INFLATE_PACKED_LITERALS 0
+#endif
 #define DIST_ROOT     8
 #define DIST_SIZE     (1u << DIST_ROOT)
 #define DIST_ARENA    4096
@@ -434,10 +439,17 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                 /* build_table gives valid literals a nonzero bit count, so
                  * their entries exceed F_LIT. Reserved symbols are exactly
                  * F_LIT; matches, EOB and subtable entries are below it. */
+#if INFLATE_PACKED_LITERALS
+                uint32_t literals;
+#endif
                 e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
                 nb = e & 0xF;
                 if (e > F_LIT) {
+#if INFLATE_PACKED_LITERALS
+                    literals = (e >> 8) & 255;
+#else
                     out[pos] = (uint8_t)(e >> 8);
+#endif
                     bitbuf >>= nb; bitcnt -= nb;
                     e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
                     nb = e & 0xF;
@@ -447,7 +459,11 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                     if (e > F_LIT &&
                         (unsigned)bitcnt >= nb) {
 #endif
+#if INFLATE_PACKED_LITERALS
+                        literals |= e & 0xff00u;
+#else
                         out[pos + 1] = (uint8_t)(e >> 8);
+#endif
                         bitbuf >>= nb; bitcnt -= nb;
                         pos += 2;
                         e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
@@ -458,7 +474,12 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                         if (e > F_LIT &&
                             bitcnt >= (int)nb) {
 #endif
+#if INFLATE_PACKED_LITERALS
+                            literals |= (e & 0xff00u) << 8;
+                            ++pos;
+#else
                             out[pos++] = (uint8_t)(e >> 8);
+#endif
                             DROP(nb);
                             e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
                             nb = e & 0xF;
@@ -468,11 +489,25 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                             if (e > F_LIT &&
                                 bitcnt >= (int)nb) {
 #endif
+#if INFLATE_PACKED_LITERALS
+                                literals |= (e & 0xff00u) << 16;
+                                memcpy(out + pos - 3, &literals, 4);
+                                ++pos;
+#else
                                 out[pos++] = (uint8_t)(e >> 8);
+#endif
                                 DROP(nb);
                                 continue;
                             }
+#if INFLATE_PACKED_LITERALS
+                            memcpy(out + pos - 3, &literals, 2);
+                            out[pos - 1] = (uint8_t)(literals >> 16);
+                            goto slow_decode;
+#endif
                         }
+#if INFLATE_PACKED_LITERALS
+                        memcpy(out + pos - 2, &literals, 2);
+#endif
                         /* A following match can need more bits than remain.
                          * Refill before consuming any nonliteral entry. */
                         goto slow_decode;
@@ -481,6 +516,9 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                      * literal is stored and consumed already.  A simple
                      * EOB can be consumed directly (its bits are valid);
                      * anything else re-decodes after a refill. */
+#if INFLATE_PACKED_LITERALS
+                    out[pos] = (uint8_t)literals;
+#endif
                     pos += 1;
                     if (e & F_EOB) {
                         DROP(nb);
