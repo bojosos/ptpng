@@ -91,6 +91,30 @@ PTPNG_API_INLINE uint16x8_t paeth_pixel_neon(uint16x8_t s, uint16x8_t a,
     return vandq_u16(vaddq_u16(s, predictor), vdupq_n_u16(255));
 }
 
+#if defined(__linux__) && defined(__aarch64__) && defined(__GNUC__) && \
+    !defined(__clang__)
+static int paeth_row_is_zero(const uint8_t *src, size_t count)
+{
+    size_t i = 0;
+    /* Reject ordinary photo rows after one load. Flat rows amortize the
+     * horizontal reduction over four vectors for the rest of the scan. */
+    if (count >= 16) {
+        if (vmaxvq_u8(vld1q_u8(src))) return 0;
+        i = 16;
+    }
+    for (; count - i >= 64; i += 64) {
+        uint8x16_t a = vorrq_u8(vld1q_u8(src + i), vld1q_u8(src + i + 16));
+        uint8x16_t b = vorrq_u8(vld1q_u8(src + i + 32), vld1q_u8(src + i + 48));
+        if (vmaxvq_u8(vorrq_u8(a, b))) return 0;
+    }
+    for (; count - i >= 16; i += 16)
+        if (vmaxvq_u8(vld1q_u8(src + i))) return 0;
+    for (; i < count; ++i)
+        if (src[i]) return 0;
+    return 1;
+}
+#endif
+
 /* Clang uses a separate stride-selection wrapper. MSVC keeps the
  * original kernel and direct dispatch to avoid an eight-byte regression. */
 #if defined(__clang__)
@@ -102,6 +126,15 @@ static void ptpng_filter_paeth_neon(uint8_t *dst, const uint8_t *src,
 {
     size_t i = 0;
     uint16x8_t a = vdupq_n_u16(0), c = vdupq_n_u16(0);
+#if defined(__linux__) && defined(__aarch64__) && defined(__GNUC__) && \
+    !defined(__clang__)
+    /* Zero residuals preserve the previous row: after the first pixel,
+     * decoded-left equals upper-left and Paeth therefore selects above. */
+    if (bpp == 8 && paeth_row_is_zero(src, count)) {
+        memmove(dst, prev, count);
+        return;
+    }
+#endif
 #if defined(__GNUC__) && !defined(__clang__)
     /* Preserve the measured GCC layout: four-byte pixels branch to the
      * shared tail, while eight-byte pixels reach their loop directly. */
