@@ -60,6 +60,33 @@ on the original CPU and cannot be dismissed as timing noise. The
 fixed-literal change and its compiler-selection overrides are excluded
 from the retained ARM patch.
 
+An additional section-placement trial keeps native MSVC x64 encoder
+functions in `.text$deflate`, before the inflater's ordinary code section.
+Hosted PE inspection verifies identical operational instructions in all
+ten encoder functions and restores each entry's baseline offset modulo
+64. The original fixed-width trial moved every later function by 304
+bytes; the section contract prevents inflater growth from moving this
+encoder block.
+
+The [five-pair screen](https://github.com/bojosos/ptpng/actions/runs/38943228616)
+on Xeon 8370C confirms native/RGB noise at 1.339x/1.313x. The integrated
+[nine-pair half-second repeat](https://github.com/bojosos/ptpng/actions/runs/38944022718)
+tests `099174c` against merged ARM main `c7dfd64` on all five platforms.
+EPYC 7763 confirms noise at 1.390x/1.405x, with every pair faster.
+Graphics encoding recovers to 1.001x/0.984x/1.003x for palette/RGB/RGBA16,
+with all ranges crossing parity; the encode mean is 1.0005x.
+
+Keep this rescue provisional: photo RGB-to-RGBA decoding is 0.967x
+(0.899–0.990x), slower in all nine pairs. Gray16 photo is 0.952x
+(0.903–1.020x), slower in eight pairs. The 14-case decode mean improves
+1.034x, but these remaining photo costs prevent retaining the trial.
+All 1,035 paired size tuples match, all four disabled-platform executable
+code comparisons are identical, and the Windows executable text matches
+the isolated screen. All eleven integrated
+[CI](https://github.com/bojosos/ptpng/actions/runs/38943390752) and
+[sanitizer fuzz jobs](https://github.com/bojosos/ptpng/actions/runs/38943395622)
+pass. This branch preserves the experiment; it is not merged.
+
 ### Copy zero Paeth residual rows on Linux ARM64
 
 For an all-zero Paeth residual row, reconstruction equals the previous
