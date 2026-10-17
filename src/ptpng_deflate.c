@@ -96,6 +96,7 @@ PTPNG_API_INLINE unsigned deflate_log2(unsigned value)
 /* Bounded per-call state. Token-limited blocks avoid large headers on
  * repetitive data while adapting the trees to changing image statistics. */
 #define DEFLATE_HASH_BITS 16
+#define DEFLATE_SHORT_HASH_BITS 15
 #define DEFLATE_WINDOW 32768
 #define DEFLATE_TOKENS 32768
 #define DEFLATE_BLOCK_BYTES (1024u * 1024u)
@@ -124,7 +125,7 @@ typedef struct {
     uint32_t previous[DEFLATE_WINDOW];
     /* The long chain hashes six bytes. A separate, shallow three-byte
      * chain recovers profitable short matches in noisier image residuals. */
-    uint32_t short_head[1u << DEFLATE_HASH_BITS];
+    uint32_t short_head[1u << DEFLATE_SHORT_HASH_BITS];
 #if DEFLATE_SINGLE_SHORT_LINK
     /* A single-candidate search reads only the latest insertion's link. */
     uint32_t short_link;
@@ -199,7 +200,7 @@ PTPNG_API_INLINE uint32_t deflate_insert(deflate_state *state,
         memcpy(&word, src + pos, sizeof(word));
         short_value = (uint32_t)word & UINT32_C(0x00ffffff);
         short_hash = (short_value * UINT32_C(2654435761)) >>
-                     (32 - DEFLATE_HASH_BITS);
+                     (32 - DEFLATE_SHORT_HASH_BITS);
         word &= UINT64_C(0x0000ffffffffffff);
         hash = (unsigned)((word * UINT64_C(0x9e3779b97f4a7c15)) >>
                           (64 - DEFLATE_HASH_BITS));
@@ -219,7 +220,7 @@ PTPNG_API_INLINE uint32_t deflate_insert(deflate_state *state,
         uint32_t value = src[pos] | ((uint32_t)src[pos + 1] << 8) |
                          ((uint32_t)src[pos + 2] << 16);
         unsigned short_hash = (value * UINT32_C(2654435761)) >>
-                              (32 - DEFLATE_HASH_BITS);
+                              (32 - DEFLATE_SHORT_HASH_BITS);
 #if DEFLATE_SINGLE_SHORT_LINK
         if (save_short_link) state->short_link = state->short_head[short_hash];
 #else
