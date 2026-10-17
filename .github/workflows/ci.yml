@@ -127,6 +127,22 @@ jobs:
       - name: Unit tests under sanitizers
         run: ctest --test-dir build --output-on-failure
 
+      - uses: actions/checkout@v4
+        if: matrix.name == 'linux-x64-gcc-asan-ubsan'
+        with:
+          ref: c7dfd6475457edb9d4ea4bc2caede2cde7249be5
+          path: experiment-baseline
+
+      - name: Compare production GCC inflater with baseline under sanitizers
+        if: matrix.name == 'linux-x64-gcc-asan-ubsan'
+        run: |
+          flags='-O2 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Iinclude -Isrc'
+          gcc $flags -c src/ptpng_inflate.c -o build/experiment-candidate.o
+          gcc $flags -Dptpng_inflate=baseline_inflate -Dptpng_inflate_dyn=baseline_inflate_dyn -Dptpng_try_inflate_stored=baseline_try_inflate_stored -c experiment-baseline/src/ptpng_inflate.c -o build/experiment-baseline.o
+          gcc $flags tools/experiment_inflate_differential.c build/experiment-candidate.o build/experiment-baseline.o -o build/experiment-inflate
+          python3 tools/experiment_inflate_corpus.py build/experiment-inflate.bin
+          ./build/experiment-inflate build/experiment-inflate.bin
+
       - name: Corpus decode under sanitizers
         run: |
           for f in third_party/libpng-libpng16/contrib/testpngs/*.png; do
