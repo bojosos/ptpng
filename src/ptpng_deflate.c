@@ -493,7 +493,12 @@ static size_t deflate_parse(deflate_state *state, const uint8_t *src,
             *extra_bits += deflate_len_extra[ls] + (ds < 4 ? 0 : (ds >> 1) - 1);
             /* The next search inserts its own position first, so interior
              * single-candidate predecessor links are never observed. */
-            for (insert = pos + 1 + inserted_next; insert < pos + length; ++insert)
+            for (insert = pos + 1 + inserted_next; insert + 1 < pos + length;
+                 insert += 2) {
+                deflate_insert_interior(state, src, insert, size);
+                deflate_insert_interior(state, src, insert + 1, size);
+            }
+            if (insert < pos + length)
                 deflate_insert_interior(state, src, insert, size);
             pos += length;
         } else {
