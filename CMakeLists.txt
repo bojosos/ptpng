@@ -59,6 +59,9 @@ elseif(PTPNG_ARM)
                                  src/ptpng_crc_arm.c)
 endif()
 
+# Append the isolated decoder so existing objects retain their link order.
+target_sources(ptpng PRIVATE src/ptpng_inflate_fixed.c)
+
 if(MSVC)
     target_compile_options(ptpng PRIVATE /W3
                                          /D_CRT_SECURE_NO_WARNINGS)
