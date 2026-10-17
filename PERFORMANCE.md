@@ -51,6 +51,38 @@ slower. Native RGB/Gray16 photo medians are 0.971x/0.952x, with ranges that
 cross parity. Its 1,035 paired input/decoded/output size tuples match.
 The noise gains therefore do not establish a safe general Windows gain.
 
+The [fresh main profiles](https://github.com/bojosos/ptpng/actions/runs/39023897528)
+retain the actual inputs and executable files. RGB-photo decoding attributes
+92.9% of x64 self samples and 88.5% of ARM64 self samples to inflation.
+RGBA16 photos attribute 81.2%/76.8% to inflation and 12.6%/15.4% to Paeth.
+Linux noise now spends 51.3%/56.6% in Paeth, with x64 CRC at 20.2%; the
+stored-stream shortcut has moved that workload's main cost away from copying
+compressed data. RGB-photo encoding still attributes 83.9%/80.4% to long
+matching. RGBA16-photo encoding splits its x64 self samples between inlined
+compression work at 37.0%, long matching at 28.0%, short matching at 22.9%
+and token emission at 8.0%. x64 uses software timer sampling; ARM64 exposes
+hardware cycle sampling. These samples include loading and warm-up.
+
+### Rejected initial experiments
+
+Each screen compares with `c7dfd64` using five alternating 0.3-second pairs
+for all 23 workloads on five platforms.
+
+| Experiment | Hosted comparison | Decision |
+| --- | --- | --- |
+| Reuse the root-table entry after batched literals on Linux GCC x64 | [39023951819](https://github.com/bojosos/ptpng/actions/runs/39023951819) | Reject as-is. RGB/RGBA8/Gray16/RGBA16 photo decode improves 2.0-3.3%, but three graphics encoders fall to 0.838-0.853x, with every pair slower. Palette native decode is 0.984x. |
+| Reread an overlapping refill byte and simplify the bit-count update on Linux GCC x64 | [screen](https://github.com/bojosos/ptpng/actions/runs/39023996904), [repeat](https://github.com/bojosos/ptpng/actions/runs/39024442706) | Reject as-is. EPYC 9V74 initially improves RGB/Gray8/Gray16 photo decode 2-3% with encoding near parity. The nine-pair half-second EPYC 7763 repeat gives 0.768-0.775x for three graphics encoders, with every pair slower, and a 0.917x encode mean. Palette native decode is 0.974x. Both versions' executable text is identical across the two runs. |
+| Reduce the short hash table from 16 to 15 bits | [39023976312](https://github.com/bojosos/ptpng/actions/runs/39023976312) | Reject. macOS RGBA16-photo encode is 1.001x with a 0.936-1.118x range. Windows x64 noise encode is 0.929x with every pair slower, and its RGBA16 photo is 0.981x. Linux ARM64 RGB-graphics decode is 0.938x with every pair slower. |
+| Unroll interior dictionary insertion by two positions | [39024020867](https://github.com/bojosos/ptpng/actions/runs/39024020867) | Reject. macOS RGBA16-photo encode is 1.008x with a 0.880-1.037x range. Three graphics encoders lose in every pair on Linux x64 at 0.909-0.918x and Windows ARM64 at 0.970-0.973x. Windows x64 palette/RGB graphics fall to 0.889x/0.848x. |
+
+The hash-table screen validates 575 matching input/decoded size pairs.
+RGBA8/RGBA16-photo PNGs grow 0.206%/0.078% on the one-candidate paths and
+0.071%/0.049% on MSVC x64. Gray8 shrinks 44/30 bytes, respectively; the
+other six fixture sizes stay unchanged. The insertion screen preserves all
+575 input/decoded/output size tuples. Local insertion checks also pass
+1,660 raw streams, 2,307 PNG round trips and filter parity. Neither encoder
+trial resolves the macOS target, so no encoder change is retained.
+
 ## 16 October follow-up experiments
 
 This round compares against main `db34161`, which already includes the
