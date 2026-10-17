@@ -58,6 +58,19 @@ static const uint8_t cl_perm[19] = {
 #define LOAD64LE(p)     ptpng_load64le(p)
 #define STORE64LE(p, v) ptpng_store64le(p, v)
 
+#if defined(__linux__) && defined(__x86_64__) && defined(__GNUC__) && \
+    !defined(__clang__)
+/* Keep one byte available to reread when bitcnt is byte-aligned. The OR
+ * refill makes that overlap idempotent, and the count needs one OR. */
+#define ADVANCE_WORD() do { in += (63 - bitcnt) >> 3; bitcnt |= 56; } while (0)
+#else
+#define ADVANCE_WORD()                                                   \
+    do {                                                                \
+        in += (64 - bitcnt) >> 3;                                        \
+        bitcnt += (64 - bitcnt) & ~7;                                    \
+    } while (0)
+#endif
+
 PTPNG_API_INLINE uint64_t ptpng_load64le(const void *p)
 {
     uint64_t v;
@@ -276,8 +289,7 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
         if (bitcnt >= 0 && bitcnt < 48) {                               \
             if ((size_t)(in_end - in) >= 8) {                            \
                 bitbuf |= LOAD64LE(in) << bitcnt;                       \
-                in += (64 - bitcnt) >> 3;                               \
-                bitcnt += (64 - bitcnt) & ~7;                           \
+                ADVANCE_WORD();                                         \
             } else {                                                    \
                 while (bitcnt <= 56 && in < in_end) {                   \
                     bitbuf |= (uint64_t)*in++ << bitcnt;                \
