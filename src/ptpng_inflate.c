@@ -30,6 +30,12 @@
 #else
 #define INFLATE_BATCH_BIT_GUARD 0
 #endif
+#if defined(__linux__) && defined(__x86_64__) && defined(__GNUC__) && \
+    !defined(__clang__)
+#define INFLATE_REUSE_ROOT_ENTRY 1
+#else
+#define INFLATE_REUSE_ROOT_ENTRY 0
+#endif
 #define DIST_ROOT     8
 #define DIST_SIZE     (1u << DIST_ROOT)
 #define DIST_ARENA    4096
@@ -475,6 +481,10 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                         }
                         /* A following match can need more bits than remain.
                          * Refill before consuming any nonliteral entry. */
+#if INFLATE_REUSE_ROOT_ENTRY
+                        if (bitcnt >= LITLEN_ROOT)
+                            goto refill_cached_entry;
+#endif
                         goto slow_decode;
                     }
                     /* second symbol is not a simple literal; the first
@@ -486,6 +496,10 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                         DROP(nb);
                         break;
                     }
+#if INFLATE_REUSE_ROOT_ENTRY
+                    if (bitcnt >= LITLEN_ROOT)
+                        goto refill_cached_entry;
+#endif
                     goto slow_decode;
                 }
                 /* first symbol is not a simple literal */
@@ -503,6 +517,14 @@ slow_decode:
              * idempotent, so re-decoding after the refill is safe */
             REFILL();
             e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
+#if INFLATE_REUSE_ROOT_ENTRY
+            goto decode_root_entry;
+refill_cached_entry:
+            /* The root bits were available before the refill. Adding bits
+             * above them cannot change the already-decoded root entry. */
+            REFILL();
+decode_root_entry:
+#endif
             if (e & F_SUB) {
                 DROP(LITLEN_ROOT);
                 e = lit_arena[((e >> 8) & 0xFFFF) +
