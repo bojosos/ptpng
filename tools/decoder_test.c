@@ -562,6 +562,64 @@ static void test_literal_boundaries(void)
     }
 }
 
+static void test_fixed_literal_codes(void)
+{
+    unsigned prefix;
+    /* Every literal at each batch position, through the exact-size API. */
+    for (prefix = 0; prefix < 4; ++prefix) {
+        unsigned char zs[320] = {0x78,0x01}, expected[259], out[260];
+        unsigned size = prefix + 256, bit = 16, i;
+        unsigned long a = 1, b = 0;
+        size_t n;
+        put_bits(zs, &bit, 3, 3);
+        for (i = 0; i < prefix; ++i) expected[i] = (unsigned char)(i & 1 ? 255 : 0);
+        for (i = 0; i < 256; ++i) expected[prefix + i] = (unsigned char)i;
+        for (i = 0; i < size; ++i) {
+            fixed_symbol(zs, &bit, expected[i]);
+            a += expected[i]; b += a;
+        }
+        fixed_symbol(zs, &bit, 256);
+        n = (bit + 7) / 8;
+        be32(zs + n, ((b % 65521) << 16) | (a % 65521));
+        n += 4;
+        memset(out, 0xa5, sizeof(out));
+        CHECK(ptpng_inflate(zs, n, out, size, 0) == PTPNG_OK);
+        CHECK(memcmp(out, expected, size) == 0);
+        CHECK(out[size] == 0xa5);
+        zs[n - 1] ^= 1;
+        CHECK(ptpng_inflate(zs, n, out, size, 0) == PTPNG_E_BAD_ADLER);
+        CHECK(ptpng_inflate(zs, n, out, size, PTPNG_INF_NO_ADLER) == PTPNG_OK);
+        CHECK(memcmp(out, expected, size) == 0);
+    }
+}
+
+static void test_fixed_stream_fallback(void)
+{
+    unsigned char zs[64] = {0x78,0x01}, expected[9], out[10];
+    unsigned bit = 16, i;
+    unsigned long a = 1, b = 0;
+    size_t n;
+    put_bits(zs, &bit, 2, 3); /* Nonfinal fixed block. */
+    for (i = 0; i < 8; ++i) {
+        expected[i] = (unsigned char)(17 + i * 29);
+        fixed_symbol(zs, &bit, expected[i]);
+    }
+    fixed_symbol(zs, &bit, 256);
+    put_bits(zs, &bit, 1, 3); /* Final stored block rejects the shortcut. */
+    n = (bit + 7) / 8;
+    zs[n++] = 1; zs[n++] = 0; zs[n++] = 254; zs[n++] = 255;
+    zs[n++] = expected[8] = 203;
+    for (i = 0; i < sizeof(expected); ++i) { a += expected[i]; b += a; }
+    be32(zs + n, ((b % 65521) << 16) | (a % 65521));
+    n += 4;
+    memset(out, 0xa5, sizeof(out));
+    CHECK(ptpng_inflate(zs, n, out, sizeof(expected), 0) == PTPNG_OK);
+    CHECK(memcmp(out, expected, sizeof(expected)) == 0);
+    CHECK(out[sizeof(expected)] == 0xa5);
+    zs[n++] = 0;
+    CHECK(ptpng_inflate(zs, n, out, sizeof(expected), 0) == PTPNG_E_INFLATE_CORRUPT);
+}
+
 static void test_match_copies(void)
 {
     static const unsigned bases[] = {3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,
@@ -623,6 +681,8 @@ int main(void)
     test_mixed_blocks();
     test_fragmented_stored_blocks();
     test_literal_boundaries();
+    test_fixed_literal_codes();
+    test_fixed_stream_fallback();
     test_match_copies();
     if (failures) return 1;
     puts("decoder: metadata, limits, and malformed chunk regressions OK");

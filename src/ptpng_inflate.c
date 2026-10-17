@@ -30,6 +30,13 @@
 #else
 #define INFLATE_BATCH_BIT_GUARD 0
 #endif
+#ifndef INFLATE_FIXED_STREAM
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64)
+#define INFLATE_FIXED_STREAM 1
+#else
+#define INFLATE_FIXED_STREAM 0
+#endif
+#endif
 #define DIST_ROOT     8
 #define DIST_SIZE     (1u << DIST_ROOT)
 #define DIST_ARENA    4096
@@ -685,7 +692,12 @@ have_entry:
     return PTPNG_OK;
 }
 
-int ptpng_inflate(const uint8_t *in, size_t in_len, uint8_t *out,
+#if INFLATE_FIXED_STREAM
+#define INFLATE_PUBLIC ptpng_inflate_fallback
+#else
+#define INFLATE_PUBLIC ptpng_inflate
+#endif
+int INFLATE_PUBLIC(const uint8_t *in, size_t in_len, uint8_t *out,
                   size_t out_len, uint32_t flags)
 {
     size_t produced;
@@ -693,6 +705,7 @@ int ptpng_inflate(const uint8_t *in, size_t in_len, uint8_t *out,
         return PTPNG_E_BAD_ARG;
     return inflate_impl(in, in_len, out, out_len, flags, 1, &produced);
 }
+#undef INFLATE_PUBLIC
 
 int ptpng_inflate_dyn(const uint8_t *in, size_t in_len, size_t max_out,
                       uint8_t **out, size_t *out_len)
@@ -795,3 +808,4 @@ int ptpng_try_inflate_stored(const struct ptpng_inflate_chunk *chunks,
     return 1;
 }
 #endif
+
