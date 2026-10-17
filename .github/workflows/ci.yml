@@ -97,6 +97,10 @@ jobs:
             os: ubuntu-latest
             cc: clang
             cxx: clang++
+          - name: linux-x64-gcc-asan-ubsan
+            os: ubuntu-latest
+            cc: gcc
+            cxx: g++
           - name: linux-arm64-gcc-asan-ubsan
             os: ubuntu-24.04-arm
             cc: gcc
