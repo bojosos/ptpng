@@ -49,6 +49,7 @@ jobs:
           cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo
           -DPTPNG_BUILD_FUZZERS=ON -DPTPNG_WITH_LIBPNG=ON
           -DPTPNG_BUILD_BENCH=OFF -DPTPNG_WITH_ZLIB_NG=OFF
+          -DCMAKE_C_FLAGS=-DINFLATE_FIXED_STREAM=1
 
       - name: Build
         run: cmake --build build-fuzz --target fuzz_decode fuzz_inflate fuzz_encode fuzz_deflate --parallel 2
