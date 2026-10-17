@@ -4,6 +4,53 @@ ptpng targets fast single-threaded PNG decoding on x86 AVX2 and ARM64
 NEON. A kernel benchmark measures one operation; it does not establish
 the speed of a complete PNG decode or a lead over every other decoder.
 
+## 17 October nightly investigation
+
+The [nightly on `c7dfd64`](https://github.com/bojosos/ptpng/actions/runs/39013902174)
+passes correctness and independent libpng pixel checks on all five platforms.
+Its within-run geometric mean throughput ratios against libpng with zlib-ng
+are:
+
+| Platform | Decode, 27 cases | Encode against level 6, nine images | Decode cases faster |
+| --- | ---: | ---: | ---: |
+| Linux x64 | 1.778x | 1.853x | 27/27 |
+| Linux ARM64 | 1.816x | 1.454x | 27/27 |
+| macOS ARM64 | 1.634x | 1.449x | 27/27 |
+| Windows x64 | 1.646x | 1.676x | 25/27 |
+| Windows ARM64 | 1.507x | 1.669x | 27/27 |
+
+Windows x64 noise decoding remains below parity: native and RGBA8 are
+0.985x and 0.987x, while RGB8 is 1.003x. Windows ARM64 native noise is
+1.032x. Linux x64 native noise is also a narrow lead at 1.071x; its input
+still has 3,147,615 bytes, while Windows uses 3,319,878 bytes. Those inputs
+have different compression, so a common fixture name does not imply the
+same inflater workload.
+
+RGBA16-photo encoding is 0.819x on macOS ARM64 and 0.994x on Windows x64.
+Linux ARM64 is 1.090x and Linux x64 1.248x. The optimized encoder's output
+is 1.17% larger than level 6 zlib-ng for this image; MSVC x64 is 0.97%
+larger. These speed and size comparisons describe this fixture rather than
+every photo or compression setting.
+
+All 133 other decode comparisons beat the reference. The
+[overnight sanitizer campaigns](https://github.com/bojosos/ptpng/actions/runs/39017875034)
+complete 5,643,152 executions across eight x64/ARM64 campaigns without
+failure. Nightly ratios compare implementations on one machine. Changes
+since a previous nightly require paired measurements on the same machine,
+especially because the x64 runners alternate between Intel and AMD CPUs.
+
+Two late Windows fixed-literal trials from 16 October also remain excluded.
+The [layout screen](https://github.com/bojosos/ptpng/actions/runs/38943228616)
+compares `653b3d1` with `db34161` on Xeon 8370C. Noise native/RGB8 improves
+1.339x/1.313x, but RGB-graphics encoding is 0.994x and RGBA16-photo encoding
+0.986x, with every pair slower. The
+[selected repeat](https://github.com/bojosos/ptpng/actions/runs/38944022718)
+compares `099174c` with current main `c7dfd64` on EPYC 7763. Noise improves
+1.390x/1.405x, but RGB-photo-to-RGBA8 decode is 0.967x, with all nine pairs
+slower. Native RGB/Gray16 photo medians are 0.971x/0.952x, with ranges that
+cross parity. Its 1,035 paired input/decoded/output size tuples match.
+The noise gains therefore do not establish a safe general Windows gain.
+
 ## 16 October follow-up experiments
 
 This round compares against main `db34161`, which already includes the
