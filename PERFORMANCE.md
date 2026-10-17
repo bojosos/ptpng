@@ -104,7 +104,8 @@ between 0.98171x and 0.99981x. RGBA16 graphics is 0.9949x with a
 means are only 1.00361x/1.00139x. That benefit does not justify the repeatable
 1.6% palette loss, so the Linux changes remain outside retained source.
 Both executable code sections match their respective screen versions
-byte-for-byte across the two CPUs.
+byte-for-byte across the two CPUs. All 1,035 final size tuples match, and
+the four disabled platforms retain baseline executable code exactly.
 
 The two refill/root-entry algorithms pass 89,574 exact-capacity, truncated,
 mutated and trailing-data comparisons against the baseline, including 3,504
@@ -113,8 +114,9 @@ valid cases independently verified with zlib. The actual GCC x64
 also pass the differential checks, corpus decode and 270,000 PNG mutations.
 The [broad campaigns](https://github.com/bojosos/ptpng/actions/runs/39024634321)
 complete another 2,428,049 executions. Correctness passes do not resolve the
-performance tradeoff. The temporary differential harness and GCC x64 CI
-addition stay with these experiments.
+performance tradeoff. These Clang campaigns retain the baseline refill
+path; the GCC checks above exercise the experimental refill. The temporary
+differential harness and GCC x64 CI addition stay with these experiments.
 
 ### Isolate Windows fixed-stream decoding
 
