@@ -2,6 +2,17 @@
  * fixed, or stored blocks selected by their bit cost. All state is per call. */
 #include "ptpng_internal.h"
 
+#if defined(__linux__) && defined(__x86_64__) && defined(__GNUC__) && \
+    !defined(__clang__)
+/* Keep the outlined compressor code together, independently of decoder
+ * growth. Align the first emitted helper while retaining relative layout. */
+#define DEFLATE_CODE __attribute__((section("ptpng_deflate_code")))
+#define DEFLATE_CODE_FIRST __attribute__((section("ptpng_deflate_code"), aligned(64)))
+#else
+#define DEFLATE_CODE
+#define DEFLATE_CODE_FIRST
+#endif
+
 /* These 64-bit targets permit unaligned stores. Keep big-endian ARM and
  * architectures with unknown byte order on the byte-oriented writer. */
 #if PTPNG_X64 || defined(_M_ARM64) || \
@@ -246,7 +257,7 @@ PTPNG_API_INLINE uint32_t deflate_insert(deflate_state *state,
 #define deflate_insert_interior deflate_insert
 #endif
 
-static unsigned deflate_match(const deflate_state *state, const uint8_t *src,
+static DEFLATE_CODE unsigned deflate_match(const deflate_state *state, const uint8_t *src,
                               size_t pos, size_t end, uint32_t link,
                               unsigned minimum,
                               unsigned *best_distance)
@@ -349,7 +360,7 @@ next_match:
 /* Short matches compete with literal codes, rather than being accepted just
  * because they exist. The estimate includes 12 bits for length/distance
  * symbols, a two-bit margin, and the exact distance extra-bit count. */
-static unsigned deflate_short_match(const deflate_state *state, const uint8_t *src,
+static DEFLATE_CODE unsigned deflate_short_match(const deflate_state *state, const uint8_t *src,
                                     size_t pos, size_t end, unsigned minimum,
                                     const uint8_t literal_bits[256],
                                     unsigned *best_distance)
@@ -525,7 +536,7 @@ static void deflate_heap_push(uint16_t *heap, unsigned *count, unsigned node,
     heap[at] = (uint16_t)node;
 }
 
-static unsigned deflate_heap_pop(uint16_t *heap, unsigned *count,
+static DEFLATE_CODE_FIRST unsigned deflate_heap_pop(uint16_t *heap, unsigned *count,
                                  const uint32_t *weights)
 {
     unsigned result = heap[0], last = heap[--*count], at = 0;
@@ -709,7 +720,7 @@ static int deflate_header(deflate_writer *w, const deflate_tree *tree, unsigned 
     return 1;
 }
 
-static int deflate_emit_tokens(deflate_writer *w, const deflate_token *tokens,
+static DEFLATE_CODE int deflate_emit_tokens(deflate_writer *w, const deflate_token *tokens,
                                unsigned count, const uint32_t *lit_codes,
                                const uint32_t *dist_codes,
                                const uint8_t len_symbol[259])
@@ -768,7 +779,7 @@ static int deflate_stored_block(deflate_writer *w, const uint8_t *src,
     return 1;
 }
 
-static int deflate_compress(deflate_writer *w, deflate_state *state,
+static DEFLATE_CODE int deflate_compress(deflate_writer *w, deflate_state *state,
                             const uint8_t *src, size_t size)
 {
     uint32_t fixed_lit[286], fixed_dist[30], lit_freq[286], dist_freq[30];
@@ -822,7 +833,7 @@ static int deflate_compress(deflate_writer *w, deflate_state *state,
     return deflate_align(w);
 }
 
-int ptpng_deflate(const uint8_t *src, size_t size, uint8_t **out, size_t *out_len)
+DEFLATE_CODE int ptpng_deflate(const uint8_t *src, size_t size, uint8_t **out, size_t *out_len)
 {
     size_t blocks = size / 65535 + (size % 65535 != 0), capacity;
     uint8_t *dst;
