@@ -181,6 +181,13 @@ average encoding gain over the earlier 15 October build, including 6.5–15.6% f
 noise. Their largest additional fixture growth is 0.779%; MSVC x64 retains
 its previous PNG sizes. The full measurements include remaining losses.
 
+The [17 October follow-up](PERFORMANCE.md#17-october-nightly-investigation)
+improves Windows x64 noise decoding by 47% in native output and 46% in RGB8
+output in repeated hosted comparisons, with unchanged pixels and PNG sizes.
+Its isolated fixed-Huffman decoder preserves the existing general decoder's
+layout. Linux refill and encoder experiments remain excluded after full
+comparisons expose losses on other workloads.
+
 See [per-image times and file sizes](PERFORMANCE.md#30-september-benchmark-snapshot)
 or the [live dashboard](https://bojosos.github.io/ptpng/bench/) for all
 platforms, output formats and reference levels. The dashboard keeps full

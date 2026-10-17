@@ -83,6 +83,93 @@ other six fixture sizes stay unchanged. The insertion screen preserves all
 1,660 raw streams, 2,307 PNG round trips and filter parity. Neither encoder
 trial resolves the macOS target, so no encoder change is retained.
 
+### Linux refill layout follow-up, held
+
+The final Linux refinement moves the six outlined compressor functions into
+one named executable section. Aligning its first helper to 64 bytes retains
+every helper's previous offset within a cache line, relative order and size.
+Normalized instructions and all listed data-table addresses stay unchanged.
+The [initial screen](https://github.com/bojosos/ptpng/actions/runs/39024998487)
+on EPYC 9V45 removes the large graphics encoding losses. Linux and macOS
+complete before starting the longer same-branch run cancels the two remaining
+Windows screen jobs; the full repeat supplies all five platform controls.
+
+The [nine-pair half-second repeat](https://github.com/bojosos/ptpng/actions/runs/39025226871)
+returns to EPYC 7763, where the earlier refill lost 23% on graphics encoding.
+The large encoding loss is resolved. RGB native, RGB-to-RGBA8 and
+RGBA8-to-RGB8 decode improve 1.0194x/1.0233x/1.0072x, with every pair faster.
+However, native palette decode is 0.9841x with all nine pairs below parity,
+between 0.98171x and 0.99981x. RGBA16 graphics is 0.9949x with a
+0.98652-1.00003x range, and noise-to-RGB8 is 0.9966x. The decode/encode
+means are only 1.00361x/1.00139x. That benefit does not justify the repeatable
+1.6% palette loss, so the Linux changes remain outside retained source.
+Both executable code sections match their respective screen versions
+byte-for-byte across the two CPUs.
+
+The two refill/root-entry algorithms pass 89,574 exact-capacity, truncated,
+mutated and trailing-data comparisons against the baseline, including 3,504
+valid cases independently verified with zlib. The actual GCC x64
+[ASan/UBSan checks](https://github.com/bojosos/ptpng/actions/runs/39024631137)
+also pass the differential checks, corpus decode and 270,000 PNG mutations.
+The [broad campaigns](https://github.com/bojosos/ptpng/actions/runs/39024634321)
+complete another 2,428,049 executions. Correctness passes do not resolve the
+performance tradeoff. The temporary differential harness and GCC x64 CI
+addition stay with these experiments.
+
+### Isolate Windows fixed-stream decoding
+
+The new MSVC x64 trial puts a checked fixed-Huffman decoder in a separate
+translation unit, with its code, constant tables and zero-initialized state
+in late subsections. Local binary maps retain the established general
+inflater and encoder instruction addresses and normalized instructions, plus
+the general Huffman tables' alignment. Keeping the helper in the same source
+file had changed MSVC's existing 3,562-byte inflater to 3,227 bytes despite
+leaving its source body untouched; separate compilation avoids that change.
+
+The public entry selects the shortcut only when the compressed stream is at
+least as large as the output and its first block is fixed. A four-literal
+batch derives widths from five low bits while retaining table classification,
+36 available bits and four available output bytes. The checked decoder also
+handles fixed-block matches. Success requires an exact output size, a final
+fixed block, a valid Adler checksum unless disabled, and no trailing bytes.
+Mixed, unsupported or malformed streams restart the original decoder from
+the original input and output positions, preserving its diagnostic result.
+
+The [five-pair screen](https://github.com/bojosos/ptpng/actions/runs/39024656502)
+on EPYC 7763 gives Windows native/RGB8 noise gains of 1.448x/1.417x, with
+every pair faster. No other Windows workload loses in every pair, although
+the controls have wide ranges: noise encode is 0.906x with a 0.826-1.083x
+range and RGBA16-photo encode 0.963x with a 0.878-1.146x range. The decode
+and encode means are 1.058x/1.004x. All 575 recorded size tuples match, and
+all four disabled platforms have identical baseline/candidate executable
+code. Their timing variation is not a code change.
+
+The [nine-pair half-second repeat](https://github.com/bojosos/ptpng/actions/runs/39024994329)
+on EPYC 7763 confirms native noise at 1.470x, with every pair between
+1.437x and 1.592x, and noise-to-RGB8 at 1.456x, with a 1.265-1.559x range.
+Every other Windows workload's pair range crosses parity. All 1,035
+input/decoded/output size tuples match. Each Windows version's executable
+code matches its respective screen version exactly; the four disabled
+platforms still match baseline code exactly. The added distance/block tests
+and batch build integration do not change the measured library source.
+The decode/encode geometric means are 1.05786x/0.99883x. The large noise
+gain is repeatable; no general encoding speedup is claimed.
+
+Independent checks compare 32,928 baseline/candidate statuses and pixel
+outputs; 329 valid streams, including the actual Windows noise input, also
+match zlib. The cases cover literal values, output capacities, truncated
+prefixes, both Adler settings, multiple fixed blocks, mixed blocks, long
+matches and 10,000 mutations. Committed regressions force the shortcut's size
+gate for all distance-code classes through 32,768 and a 258-byte match,
+successful multiple fixed blocks, fixed-to-stored and fixed-to-dynamic
+fallbacks, exact truncated allocations and bad checksums. Native MSVC ASan
+passes these tests, the actual noise input and another 10,000 fixed-PNG
+mutations. Both Windows batch build entry points include the new translation
+unit and pass. Linux sanitizer and coverage-fuzz builds explicitly enable
+the specialized decoder so the production compiler guard cannot hide it.
+The [forced-branch campaigns](https://github.com/bojosos/ptpng/actions/runs/39024734694)
+complete 2,885,631 executions across eight campaigns without failure.
+
 ## 16 October follow-up experiments
 
 This round compares against main `db34161`, which already includes the

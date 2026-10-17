@@ -1,4 +1,4 @@
-/* Separate compilation keeps fixed-code experiments out of the established
+/* Separate compilation keeps fixed-code decoding out of the established
  * general inflater's optimization decisions and instruction placement. */
 #include "ptpng_internal.h"
 
