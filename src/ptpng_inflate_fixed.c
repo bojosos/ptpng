@@ -17,13 +17,20 @@
 int ptpng_inflate_fallback(const uint8_t *in, size_t in_len, uint8_t *out,
                            size_t out_len, uint32_t flags);
 
+#if defined(_MSC_VER)
+#pragma bss_seg(push, ".bss$zzfixed")
+#endif
 static struct {
     uint32_t lit[512], dist[32];
     int ready;
 } fixed;
+#if defined(_MSC_VER)
+#pragma bss_seg(pop)
+#endif
 
 #if defined(_MSC_VER)
 #pragma code_seg(push, ".text$zzfixed")
+#pragma const_seg(push, ".rdata$zzfixed")
 #endif
 
 static void fixed_init(void)
@@ -183,6 +190,7 @@ int ptpng_inflate(const uint8_t *in, size_t in_len, uint8_t *out,
 }
 
 #if defined(_MSC_VER)
+#pragma const_seg(pop)
 #pragma code_seg(pop)
 #endif
 #endif

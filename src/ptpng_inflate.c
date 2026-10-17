@@ -808,4 +808,3 @@ int ptpng_try_inflate_stored(const struct ptpng_inflate_chunk *chunks,
     return 1;
 }
 #endif
-
