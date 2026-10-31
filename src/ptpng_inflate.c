@@ -654,6 +654,18 @@ static int inflate_impl(const struct ptpng_inflate_chunk *chunks,
                                 dst += 8; src += 8;
                             } while (dst < end);
                         } else if (dist == 1) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+                            /* Inline vector stores: on AArch64 a library
+                             * fill costs more for runs this short, and
+                             * zero fills may take a cache-line zeroing path. */
+                            uint8_t pattern[16];
+                            memset(pattern, src[0], sizeof(pattern));
+                            do {
+                                memcpy(dst, pattern, 16);
+                                memcpy(dst + 16, pattern, 16);
+                                dst += 32;
+                            } while (dst < end);
+#else
                             if (len > 32) {
                                 /* long runs: the C library's fill is widest */
                                 memset(dst, src[0], len);
@@ -665,6 +677,7 @@ static int inflate_impl(const struct ptpng_inflate_chunk *chunks,
                                 STORE64LE(dst + 16, v);
                                 STORE64LE(dst + 24, v);
                             }
+#endif
                         } else {
                             /* The first dist loaded bytes are decoded; each
                              * step therefore extends the pattern by dist. */
