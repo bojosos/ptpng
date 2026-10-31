@@ -623,13 +623,41 @@ static void extract_pass_row_subbyte(uint8_t *dst_row, const uint8_t *src_row,
 static int paeth_row_is_zero(const uint8_t *p, size_t n)
 {
     size_t i = 0;
-    uint64_t a, b, c, d;
-    if (n >= 8) {
+#if PTPNG_X64
+    if (n >= 16) {
+        const __m128i zero = _mm_setzero_si128();
+        if (_mm_movemask_epi8(_mm_cmpeq_epi8(
+                _mm_loadu_si128((const __m128i *)p), zero)) != 0xFFFF)
+            return 0;
+        for (i = 16; n - i >= 64; i += 64) {
+            __m128i v = _mm_or_si128(
+                _mm_or_si128(_mm_loadu_si128((const __m128i *)(p + i)),
+                             _mm_loadu_si128((const __m128i *)(p + i + 16))),
+                _mm_or_si128(_mm_loadu_si128((const __m128i *)(p + i + 32)),
+                             _mm_loadu_si128((const __m128i *)(p + i + 48))));
+            if (_mm_movemask_epi8(_mm_cmpeq_epi8(v, zero)) != 0xFFFF)
+                return 0;
+        }
+    }
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    if (n >= 16) {
+        if (vmaxvq_u8(vld1q_u8(p))) return 0;
+        for (i = 16; n - i >= 64; i += 64) {
+            uint8x16_t v = vorrq_u8(
+                vorrq_u8(vld1q_u8(p + i), vld1q_u8(p + i + 16)),
+                vorrq_u8(vld1q_u8(p + i + 32), vld1q_u8(p + i + 48)));
+            if (vmaxvq_u8(v)) return 0;
+        }
+    }
+#endif
+    if (i == 0 && n >= 8) {
+        uint64_t a;
         memcpy(&a, p, 8);
         if (a) return 0;
         i = 8;
     }
     for (; n - i >= 32; i += 32) {
+        uint64_t a, b, c, d;
         memcpy(&a, p + i, 8);
         memcpy(&b, p + i + 8, 8);
         memcpy(&c, p + i + 16, 8);
