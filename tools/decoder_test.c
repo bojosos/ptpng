@@ -423,6 +423,70 @@ static void test_palette_out_of_range(void)
     }
 }
 
+/* A Huffman-coded stream split into tiny and empty IDAT chunks decodes
+ * exactly: chunk ends fall inside codes, extra bits, headers and the
+ * Adler-32, on both sides of the inflater's fast-loop margins. */
+static void test_fragmented_idat(void)
+{
+    enum { W = 61, H = 47 };
+    static unsigned char pixels_in[W * H * 4];
+    static unsigned char split_png[1u << 18];
+    static const unsigned sizes[] = {1, 2, 3, 0, 7, 31, 32, 33, 0, 64, 5};
+    void *encoded = NULL, *decoded = NULL;
+    size_t encoded_n = 0, decoded_n = 0, pos = 8, zlen = 0, out = 0;
+    unsigned char *z;
+    unsigned x, y, variant;
+    for (y = 0; y < H; ++y)
+        for (x = 0; x < W * 4; ++x)
+            pixels_in[y * W * 4 + x] = (unsigned char)((x * 7 + y * 3) ^
+                (((x * 2654435761u + y * 40503u) >> 13) & (x % 5 ? 3 : 255)));
+    CHECK(ptpng_encode(pixels_in, sizeof(pixels_in), W, H, W * 4, 6, 8, NULL,
+                       &encoded, &encoded_n) == PTPNG_OK);
+    if (!encoded) return;
+    z = (unsigned char *)malloc(encoded_n);
+    if (!z) { ptpng_free(encoded); CHECK(0); return; }
+    /* collect the zlib stream from every IDAT */
+    while (pos + 12 <= encoded_n) {
+        const unsigned char *c = (const unsigned char *)encoded + pos;
+        size_t len = ((size_t)c[0] << 24) | ((size_t)c[1] << 16) |
+                     ((size_t)c[2] << 8) | c[3];
+        if (!memcmp(c + 4, "IDAT", 4)) { memcpy(z + zlen, c + 8, len); zlen += len; }
+        pos += len + 12;
+    }
+    for (variant = 0; variant < 11; ++variant) {
+        size_t zpos = 0, k = variant;
+        ptpng_opts opts;
+        memset(&opts, 0, sizeof(opts));
+        opts.output_format = PTPNG_OUT_RGBA8;
+        opts.max_bytes = PTPNG_DEFAULT_MAX_BYTES;
+        /* signature and IHDR come from the encoder */
+        memcpy(split_png, encoded, 33);
+        out = 33;
+        while (zpos < zlen && out + 12 + 64 < sizeof(split_png)) {
+            size_t n = sizes[k++ % (sizeof(sizes) / sizeof(sizes[0]))];
+            if (n > zlen - zpos) n = zlen - zpos;
+            be32(split_png + out, (unsigned long)n);
+            memcpy(split_png + out + 4, "IDAT", 4);
+            memcpy(split_png + out + 8, z + zpos, n);
+            be32(split_png + out + 8 + n, crc32_ref(split_png + out + 4, n + 4));
+            out += n + 12;
+            zpos += n;
+        }
+        be32(split_png + out, 0);
+        memcpy(split_png + out + 4, "IEND", 4);
+        be32(split_png + out + 8, crc32_ref(split_png + out + 4, 4));
+        out += 12;
+        CHECK(zpos == zlen);
+        CHECK(ptpng_decode(split_png, out, &opts, &decoded, &decoded_n, NULL) == PTPNG_OK);
+        CHECK(decoded_n == sizeof(pixels_in) && decoded &&
+              memcmp(decoded, pixels_in, sizeof(pixels_in)) == 0);
+        ptpng_free(decoded);
+        decoded = NULL;
+    }
+    free(z);
+    ptpng_free(encoded);
+}
+
 static void test_mixed_blocks(void)
 {
     /* zlib-generated dynamic, fixed, stored, dynamic blocks, with sync
@@ -824,6 +888,7 @@ static void run_all(void)
     test_color_conversion_boundaries();
     test_palette_conversion_boundaries();
     test_palette_out_of_range();
+    test_fragmented_idat();
     test_mixed_blocks();
     test_fragmented_stored_blocks();
     test_literal_boundaries();

@@ -74,8 +74,10 @@ struct ptpng_inflate_sink {
                      int final);
     uint32_t adler;
 };
-int ptpng_inflate_sink(const uint8_t *in, size_t in_len, uint8_t *out,
-                       size_t out_len, uint32_t flags,
+/* The stream is the concatenation of count chunks (IDAT payloads). */
+struct ptpng_inflate_chunk;
+int ptpng_inflate_sink(const struct ptpng_inflate_chunk *chunks, size_t count,
+                       uint8_t *out, size_t out_len, uint32_t flags,
                        struct ptpng_inflate_sink *sink);
 /* Nonzero when ptpng_inflate would use its separate fixed-stream decoder. */
 int ptpng_inflate_prefers_fixed(const uint8_t *in, size_t in_len,

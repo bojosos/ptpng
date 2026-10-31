@@ -279,11 +279,54 @@ static int build_fixed(void)
 
 /* --------------------------------------------------------------------- */
 
-static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
+/* The compressed stream may arrive in several chunks (one per IDAT). The
+ * decoder reads one chunk at a time between in and in_end; ck_base is the
+ * stream offset of the current chunk. */
+struct inflate_input {
+    const struct ptpng_inflate_chunk *ck, *end;
+    size_t base;
+};
+
+/* Moves to the next nonempty chunk; returns 0 at the end of the stream. */
+static int inflate_next_chunk(struct inflate_input *src, const uint8_t **in,
+                              const uint8_t **in_end)
+{
+    const struct ptpng_inflate_chunk *c = src->ck;
+    size_t base = src->base + c->len;
+    for (++c; c < src->end; ++c) {
+        if (c->len) {
+            src->ck = c;
+            src->base = base;
+            *in = c->p;
+            *in_end = c->p + c->len;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Steps back over n already consumed bytes, possibly into earlier chunks. */
+static void inflate_unread(struct inflate_input *src, const uint8_t **in,
+                           const uint8_t **in_end, size_t n)
+{
+    while (n > (size_t)(*in - src->ck->p)) {
+        n -= (size_t)(*in - src->ck->p);
+        do { --src->ck; } while (src->ck->len == 0);
+        src->base -= src->ck->len;
+        *in = src->ck->p + src->ck->len;
+    }
+    *in -= n;
+    *in_end = src->ck->p + src->ck->len;
+}
+
+static int inflate_impl(const struct ptpng_inflate_chunk *chunks,
+                        size_t nchunks, uint8_t *out,
                         size_t out_len, uint32_t flags, int exact_size,
                         size_t *produced, struct ptpng_inflate_sink *sink)
 {
-    const uint8_t *in_end = in + in_len;
+    struct inflate_input src;
+    const uint8_t *in, *in_end;
+    size_t in_len = 0, ci;
     uint64_t bitbuf = 0;
     int bitcnt = 0;
     size_t pos = 0;
@@ -297,10 +340,31 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
     size_t next_sink = sink ? (size_t)SINK_WINDOW + SINK_STEP : SIZE_MAX;
 
     *produced = 0;
+    for (ci = 0; ci < nchunks; ci++)
+        in_len += chunks[ci].len;
     if (in_len < 6)
         return PTPNG_E_BAD_ZLIB_HEADER; /* 2 header + 4 adler minimum */
+    src.ck = chunks;
+    src.end = chunks + nchunks;
+    src.base = 0;
+    while (src.ck->len == 0)
+        ++src.ck;
+    in = src.ck->p;
+    in_end = in + src.ck->len;
+
+/* Reads one byte across chunk boundaries; a missing byte is truncation. */
+#define READ_BYTE(dst)                                                  \
+    do {                                                                \
+        if (in == in_end && !inflate_next_chunk(&src, &in, &in_end))    \
+            return PTPNG_E_TRUNCATED;                                   \
+        (dst) = *in++;                                                  \
+    } while (0)
+#define IN_REMAINING() (in_len - src.base - (size_t)(in - src.ck->p))
+
     {
-        unsigned cmf = in[0], flg = in[1];
+        unsigned cmf, flg;
+        READ_BYTE(cmf);
+        READ_BYTE(flg);
         if ((cmf & 0x0F) != 8)
             return PTPNG_E_BAD_ZLIB_HEADER;
         if ((cmf >> 4) > 7)
@@ -309,7 +373,6 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
             return PTPNG_E_BAD_ZLIB_HEADER;
         if (flg & 0x20)
             return PTPNG_E_BAD_ZLIB_HEADER; /* FDICT not allowed in PNG */
-        in += 2;
     }
 
 #define REFILL()                                                        \
@@ -320,7 +383,12 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                 in += (63 - bitcnt) >> 3;                               \
                 bitcnt |= 56;                                           \
             } else {                                                    \
-                while (bitcnt <= 56 && in < in_end) {                   \
+                /* Byte steps cross chunk ends and stop below 64 bits, \
+                 * as REFILL_FAST requires. */                          \
+                while (bitcnt < 56) {                                   \
+                    if (in == in_end &&                                 \
+                        !inflate_next_chunk(&src, &in, &in_end))        \
+                        break;                                          \
                     bitbuf |= (uint64_t)*in++ << bitcnt;                \
                     bitcnt += 8;                                        \
                 }                                                       \
@@ -359,24 +427,30 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
         if (btype == 0) {
             /* stored block: byte-align, push back whole bytes */
             unsigned drop = bitcnt & 7;
-            unsigned slen, nlen;
+            unsigned slen, nlen, b0, b1, b2, b3;
             DROP(drop);
-            in -= bitcnt >> 3;
+            inflate_unread(&src, &in, &in_end, (size_t)(bitcnt >> 3));
             bitbuf = 0; bitcnt = 0;
-            if ((size_t)(in_end - in) < 4)
-                return PTPNG_E_TRUNCATED;
-            slen = (unsigned)in[0] | ((unsigned)in[1] << 8);
-            nlen = (unsigned)in[2] | ((unsigned)in[3] << 8);
+            READ_BYTE(b0); READ_BYTE(b1); READ_BYTE(b2); READ_BYTE(b3);
+            slen = b0 | (b1 << 8);
+            nlen = b2 | (b3 << 8);
             if (slen != (~nlen & 0xFFFF))
                 return PTPNG_E_INFLATE_CORRUPT;
-            in += 4;
-            if ((size_t)(in_end - in) < slen)
+            if (IN_REMAINING() < slen)
                 return PTPNG_E_TRUNCATED;
             if (pos + slen > out_len)
                 return PTPNG_E_INFLATE_SIZE;
-            memcpy(out + pos, in, slen);
-            pos += slen;
-            in += slen;
+            while (slen) {
+                size_t take;
+                if (in == in_end)
+                    inflate_next_chunk(&src, &in, &in_end);
+                take = (size_t)(in_end - in);
+                if (take > slen) take = slen;
+                memcpy(out + pos, in, take);
+                pos += take;
+                in += take;
+                slen -= (unsigned)take;
+            }
             if (bfinal)
                 break;
             continue;
@@ -680,27 +754,32 @@ block_done:
      * padding bits */
     if (bitcnt < 0)
         return PTPNG_E_TRUNCATED;
-    in -= bitcnt >> 3;
+    inflate_unread(&src, &in, &in_end, (size_t)(bitcnt >> 3));
     bitbuf = 0; bitcnt = 0;
 
-    if ((size_t)(in_end - in) < 4)
+    if (IN_REMAINING() < 4)
         return PTPNG_E_TRUNCATED;
     if (exact_size && pos != out_len)
         return PTPNG_E_INFLATE_SIZE;
     if (sink)
         sink->progress(sink, pos, 1);
 
-    if (!(flags & PTPNG_INF_NO_ADLER)) {
-        uint32_t want = ((uint32_t)in[0] << 24) | ((uint32_t)in[1] << 16) |
-                        ((uint32_t)in[2] << 8) | (uint32_t)in[3];
-        uint32_t got = sink ? sink->adler : ptpng_adler32(out, pos);
-        if (want != got)
-            return PTPNG_E_BAD_ADLER;
+    {
+        unsigned b0, b1, b2, b3;
+        READ_BYTE(b0); READ_BYTE(b1); READ_BYTE(b2); READ_BYTE(b3);
+        if (!(flags & PTPNG_INF_NO_ADLER)) {
+            uint32_t want = ((uint32_t)b0 << 24) | ((uint32_t)b1 << 16) |
+                            ((uint32_t)b2 << 8) | (uint32_t)b3;
+            uint32_t got = sink ? sink->adler : ptpng_adler32(out, pos);
+            if (want != got)
+                return PTPNG_E_BAD_ADLER;
+        }
     }
-    in += 4;
 
-    if ((size_t)(in_end - in) > 0)
+    if (IN_REMAINING() > 0)
         return PTPNG_E_INFLATE_CORRUPT; /* trailing garbage */
+#undef READ_BYTE
+#undef IN_REMAINING
 
     *produced = pos;
     return PTPNG_OK;
@@ -715,9 +794,9 @@ block_done:
 int INFLATE_CAT(INFLATE_PUBLIC, _bmi2)(const uint8_t *in, size_t in_len,
                                       uint8_t *out, size_t out_len,
                                       uint32_t flags);
-int ptpng_inflate_sink_bmi2(const uint8_t *in, size_t in_len, uint8_t *out,
-                            size_t out_len, uint32_t flags,
-                            struct ptpng_inflate_sink *sink);
+int ptpng_inflate_sink_bmi2(const struct ptpng_inflate_chunk *chunks,
+                            size_t count, uint8_t *out, size_t out_len,
+                            uint32_t flags, struct ptpng_inflate_sink *sink);
 /* Initialization is idempotent; tests clear bmi2 afterwards to cover the
  * generic build on the same machine. */
 #define INFLATE_USE_BMI2() (ptpng_cpu_init(), ptpng_cpu.avx2 && ptpng_cpu.bmi2)
@@ -730,6 +809,7 @@ int INFLATE_EXPORT(INFLATE_PUBLIC)(const uint8_t *in, size_t in_len,
                                    uint32_t flags)
 {
     size_t produced;
+    struct ptpng_inflate_chunk chunk;
     if (!in || !out || out_len == 0)
         return PTPNG_E_BAD_ARG;
 #if PTPNG_HAVE_INFLATE_BMI2 && !defined(PTPNG_INFLATE_BMI2)
@@ -737,22 +817,26 @@ int INFLATE_EXPORT(INFLATE_PUBLIC)(const uint8_t *in, size_t in_len,
         return INFLATE_CAT(INFLATE_PUBLIC, _bmi2)(in, in_len, out, out_len,
                                                   flags);
 #endif
-    return inflate_impl(in, in_len, out, out_len, flags, 1, &produced, NULL);
+    chunk.p = in;
+    chunk.len = in_len;
+    return inflate_impl(&chunk, 1, out, out_len, flags, 1, &produced, NULL);
 }
 
-int INFLATE_EXPORT(ptpng_inflate_sink)(const uint8_t *in, size_t in_len,
-                                       uint8_t *out, size_t out_len,
-                                       uint32_t flags,
+int INFLATE_EXPORT(ptpng_inflate_sink)(const struct ptpng_inflate_chunk *chunks,
+                                       size_t count, uint8_t *out,
+                                       size_t out_len, uint32_t flags,
                                        struct ptpng_inflate_sink *sink)
 {
     size_t produced;
-    if (!in || !out || out_len == 0 || !sink)
+    if ((!chunks && count) || !out || out_len == 0 || !sink)
         return PTPNG_E_BAD_ARG;
 #if PTPNG_HAVE_INFLATE_BMI2 && !defined(PTPNG_INFLATE_BMI2)
     if (INFLATE_USE_BMI2())
-        return ptpng_inflate_sink_bmi2(in, in_len, out, out_len, flags, sink);
+        return ptpng_inflate_sink_bmi2(chunks, count, out, out_len, flags,
+                                       sink);
 #endif
-    return inflate_impl(in, in_len, out, out_len, flags, 1, &produced, sink);
+    return inflate_impl(chunks, count, out, out_len, flags, 1, &produced,
+                        sink);
 }
 #undef INFLATE_PUBLIC
 
@@ -781,8 +865,12 @@ int ptpng_inflate_dyn(const uint8_t *in, size_t in_len, size_t max_out,
     for (;;) {
         buf = (uint8_t *)malloc(cap + 1);
         if (!buf) return PTPNG_E_OUT_OF_MEMORY;
-        rc = inflate_impl(in, in_len, buf, cap, 0, 0,
-                          &produced, NULL);
+        {
+            struct ptpng_inflate_chunk chunk;
+            chunk.p = in;
+            chunk.len = in_len;
+            rc = inflate_impl(&chunk, 1, buf, cap, 0, 0, &produced, NULL);
+        }
         if (rc == PTPNG_OK)
             break;
         free(buf);

@@ -1486,34 +1486,23 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
         idat_refs = NULL;
         goto inflated;
     }
-    if (n_idat_refs == 1) {
-        idat_first = idat_refs[0].p;
-    } else if (n_idat_refs > 1) {
-        size_t off = 0, i;
-        idat_buf = (uint8_t *)malloc(idat_total);
-        if (!idat_buf) {
-            free(raw); free(zeros);
-            rc = PTPNG_E_OUT_OF_MEMORY;
-            goto fail_cleanup;
-        }
-        for (i = 0; i < n_idat_refs; i++) {
-            memcpy(idat_buf + off, idat_refs[i].p, idat_refs[i].len);
-            off += idat_refs[i].len;
-        }
-    }
-    free(idat_refs);
-    idat_refs = NULL;
-    if (prof) P2 = pt_tsc();
-
     {
-        const uint8_t *zin = idat_buf ? idat_buf : idat_first;
         uint32_t ifl = (opts->flags & PTPNG_FLAG_NO_VERIFY_ADLER)
                            ? PTPNG_INF_NO_ADLER : 0;
-        if (!zin)
-            zin = (const uint8_t *)"";
+        /* The fused path reads the IDAT payloads in place. Interlaced
+         * images, raw dumps and streams for the separate fixed decoder
+         * concatenate them first. */
+        uint8_t head[3] = {0, 0, 0};
+        size_t got = 0, i;
+        for (i = 0; i < n_idat_refs && got < 3; i++) {
+            size_t k;
+            for (k = 0; k < idat_refs[i].len && got < 3; k++)
+                head[got++] = idat_refs[i].p[k];
+        }
         if (!interlace && !getenv("PTPNG_DUMP_RAW") &&
-            !ptpng_inflate_prefers_fixed(zin, idat_total, (size_t)raw_size)) {
+            !ptpng_inflate_prefers_fixed(head, idat_total, (size_t)raw_size)) {
             struct row_sink sink;
+            if (prof) P2 = pt_tsc();
             memset(&sink, 0, sizeof(sink));
             sink.base.progress = row_sink_progress;
             sink.base.adler = 1;
@@ -1523,9 +1512,10 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
             sink.h = h;
             sink.bpp = (channels_of(ct) * depth + 7) >> 3;
             sink.check_adler = !(ifl & PTPNG_INF_NO_ADLER);
-            rc = ptpng_inflate_sink(zin, idat_total, raw, (size_t)raw_size,
-                                    ifl, &sink.base);
-            free(idat_buf);
+            rc = ptpng_inflate_sink(idat_refs, n_idat_refs, raw,
+                                    (size_t)raw_size, ifl, &sink.base);
+            free(idat_refs);
+            idat_refs = NULL;
             if (rc) {
                 free(raw); free(zeros);
                 ptpng_info_free(&linfo);
@@ -1534,7 +1524,28 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
             rc = sink.err;
             if (prof) P3 = pt_tsc();
         } else {
-            rc = ptpng_inflate(zin, idat_total, raw, (size_t)raw_size, ifl);
+            const uint8_t *zin;
+            if (n_idat_refs == 1) {
+                idat_first = idat_refs[0].p;
+            } else if (n_idat_refs > 1) {
+                size_t off = 0;
+                idat_buf = (uint8_t *)malloc(idat_total);
+                if (!idat_buf) {
+                    free(raw); free(zeros);
+                    rc = PTPNG_E_OUT_OF_MEMORY;
+                    goto fail_cleanup;
+                }
+                for (i = 0; i < n_idat_refs; i++) {
+                    memcpy(idat_buf + off, idat_refs[i].p, idat_refs[i].len);
+                    off += idat_refs[i].len;
+                }
+            }
+            free(idat_refs);
+            idat_refs = NULL;
+            if (prof) P2 = pt_tsc();
+            zin = idat_buf ? idat_buf : idat_first;
+            rc = ptpng_inflate(zin ? zin : (const uint8_t *)"", idat_total,
+                               raw, (size_t)raw_size, ifl);
             free(idat_buf);
             if (rc) {
                 free(raw); free(zeros);
