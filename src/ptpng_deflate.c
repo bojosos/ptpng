@@ -94,7 +94,7 @@ PTPNG_API_INLINE unsigned deflate_log2(unsigned value)
 }
 
 #ifndef DEFLATE_PREFETCH_AHEAD
-#define DEFLATE_PREFETCH_AHEAD 8
+#define DEFLATE_PREFETCH_AHEAD 16
 #endif
 #if defined(__GNUC__) || defined(__clang__)
 #define DEFLATE_PREFETCH(p) __builtin_prefetch(p)
