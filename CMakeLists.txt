@@ -70,7 +70,7 @@ else()
                               -Wno-unused-parameter -fno-strict-aliasing)
     # Function starts on 64-byte boundaries keep each hot loop's cache-line
     # placement independent of the size of unrelated code before it.
-    target_compile_options(ptpng PRIVATE -falign-functions=64)
+    target_compile_options(ptpng PRIVATE -falign-functions=64 -falign-loops=32)
 endif()
 
 # ---- the CLI tool and unit testers -------------------------------------
