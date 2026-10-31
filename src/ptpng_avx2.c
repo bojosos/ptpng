@@ -168,57 +168,64 @@ void ptpng_filter_up_avx2(uint8_t *dst, const uint8_t *src,
         dst[i] = (uint8_t)(src[i] + prev[i]);
 }
 
-/* The bytes of a four- or eight-byte pixel are independent Paeth chains. Keep
- * the decoded pixel in 16-bit lanes and select all predictors together.
- * Scalar remains faster for three-byte pixels on some x86 cores. */
+/* The bytes of a pixel are independent Paeth chains. Keep the decoded pixel
+ * in 16-bit lanes and select all predictors together. Only the left pixel
+ * a arrives late, so 3c - b is formed beforehand and the threshold
+ * 3c - a - b needs one subtraction after a. Values span -510..765, safely
+ * inside signed 16-bit lanes; threshold equality selects a or b, never c.
+ * A byte add of the zero-extended lanes yields (s + predictor) mod 256
+ * with clear high bytes, so no mask is needed. */
+#define PAETH_PIXEL()                                                        do {                                                                         __m128i lo = _mm_min_epi16(a, b), hi = _mm_max_epi16(a, b);              __m128i t = _mm_sub_epi16(cb, a), p;                                     p = _mm_blendv_epi8(hi, c, _mm_cmpgt_epi16(t, lo));                      p = _mm_blendv_epi8(lo, p, _mm_cmpgt_epi16(hi, t));                      a = _mm_add_epi8(s, p);                                              } while (0)
+
+/* Three- and six-byte pixels load a whole four- or eight-byte group that
+ * stays inside the row; the extra lanes compute independent garbage. Stores
+ * write exactly one pixel, so overlapping or in-place rows stay correct.
+ * The final pixels, whose group would leave the row, use the scalar tail. */
 void ptpng_filter_paeth_avx2(uint8_t *dst, const uint8_t *src,
                              const uint8_t *prev, size_t count, unsigned bpp)
 {
     size_t i = 0;
     __m128i a = _mm_setzero_si128(), c = _mm_setzero_si128();
-    const __m128i mask = _mm_set1_epi16(255);
-    if (bpp != 4) {
-        if (bpp == 8) {
-            for (; i + 8 <= count; i += 8) {
-                __m128i b, s, lo, hi, threshold, predictor;
-                b = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(prev + i)));
-                s = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(src + i)));
-                lo = _mm_min_epi16(a, b);
-                hi = _mm_max_epi16(a, b);
-                threshold = _mm_sub_epi16(_mm_add_epi16(c, _mm_slli_epi16(c, 1)),
-                                          _mm_add_epi16(a, b));
-                predictor = _mm_blendv_epi8(hi, c, _mm_cmpgt_epi16(threshold, lo));
-                predictor = _mm_blendv_epi8(lo, predictor, _mm_cmpgt_epi16(hi, threshold));
-                a = _mm_and_si128(_mm_add_epi16(s, predictor), mask);
-                c = b;
-                _mm_storel_epi64((__m128i *)(dst + i), _mm_packus_epi16(a, a));
-            }
-            goto scalar_tail;
+    if (bpp == 8) {
+        for (; i + 8 <= count; i += 8) {
+            __m128i b = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(prev + i)));
+            __m128i s = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(src + i)));
+            __m128i cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
+            PAETH_PIXEL();
+            c = b;
+            _mm_storel_epi64((__m128i *)(dst + i), _mm_packus_epi16(a, a));
         }
+    } else if (bpp == 6) {
+        for (; i + 8 <= count; i += 6) {
+            __m128i b = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(prev + i)));
+            __m128i s = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(src + i)));
+            __m128i cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
+            uint8_t out[8];
+            PAETH_PIXEL();
+            c = b;
+            _mm_storel_epi64((__m128i *)out, _mm_packus_epi16(a, a));
+            memcpy(dst + i, out, 6);
+        }
+    } else if (bpp == 4 || bpp == 3) {
+        for (; i + 4 <= count; i += bpp) {
+            uint32_t sv, bv, out;
+            __m128i b, s, cb;
+            memcpy(&sv, src + i, 4);
+            memcpy(&bv, prev + i, 4);
+            b = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)bv));
+            s = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)sv));
+            cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
+            PAETH_PIXEL();
+            c = b;
+            out = (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(a, a));
+            if (bpp == 4) memcpy(dst + i, &out, 4);
+            else memcpy(dst + i, &out, 3);
+        }
+    } else {
         ptpng_filter_paeth_scalar(dst, src, prev, count, bpp);
         return;
     }
-    for (; i + 4 <= count; i += 4) {
-        uint32_t sv, bv, out;
-        __m128i b, s, lo, hi, threshold, predictor;
-        memcpy(&sv, src + i, 4);
-        memcpy(&bv, prev + i, 4);
-        b = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)bv));
-        s = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)sv));
-        lo = _mm_min_epi16(a, b);
-        hi = _mm_max_epi16(a, b);
-        /* Values span -510..765, safely inside signed 16-bit lanes.
-         * Threshold equality must select a or b, never c. */
-        threshold = _mm_sub_epi16(_mm_add_epi16(c, _mm_slli_epi16(c, 1)),
-                                  _mm_add_epi16(a, b));
-        predictor = _mm_blendv_epi8(hi, c, _mm_cmpgt_epi16(threshold, lo));
-        predictor = _mm_blendv_epi8(lo, predictor, _mm_cmpgt_epi16(hi, threshold));
-        a = _mm_and_si128(_mm_add_epi16(s, predictor), mask);
-        c = b;
-        out = (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(a, a));
-        memcpy(dst + i, &out, 4);
-    }
-scalar_tail:
+    /* scalar tail: final pixels, unsupported strides via the branch above */
     for (; i < count; i++) {
         int a = i >= bpp ? dst[i - bpp] : 0;
         int b = prev[i], c = i >= bpp ? prev[i - bpp] : 0;
@@ -228,6 +235,7 @@ scalar_tail:
         dst[i] = (uint8_t)(src[i] + predictor);
     }
 }
+#undef PAETH_PIXEL
 
 /* ---- conversion tables (filled from scalar, hot entries overridden) ---- */
 

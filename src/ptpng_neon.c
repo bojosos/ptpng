@@ -74,39 +74,37 @@ static void ptpng_filter_sub_neon(uint8_t *dst, const uint8_t *src,
 #undef SUB_BLOCKS
 #undef SUB_PREFIX
 
-/* Four- and eight-byte pixels contain independent Paeth chains. Signed
- * 16-bit thresholds cover -510..765; equality selects a or b, never c. */
+/* The bytes of a pixel are independent Paeth chains. Signed 16-bit
+ * thresholds cover -510..765; equality selects a or b, never c. Only the
+ * left pixel a arrives late: cb = 3c - b is formed beforehand, and a byte
+ * add of the zero-extended lanes gives (s + predictor) mod 256 with clear
+ * high bytes, which keeps the dependent chain to five operations. */
 PTPNG_API_INLINE uint16x8_t paeth_pixel_neon(uint16x8_t s, uint16x8_t a,
                                           uint16x8_t b, uint16x8_t c)
 {
+    int16x8_t cb = vsubq_s16(vreinterpretq_s16_u16(vaddq_u16(c, vshlq_n_u16(c, 1))),
+                             vreinterpretq_s16_u16(b));
     int16x8_t lo = vreinterpretq_s16_u16(vminq_u16(a, b));
     int16x8_t hi = vreinterpretq_s16_u16(vmaxq_u16(a, b));
-    int16x8_t threshold = vsubq_s16(
-        vreinterpretq_s16_u16(vaddq_u16(c, vshlq_n_u16(c, 1))),
-        vreinterpretq_s16_u16(vaddq_u16(a, b)));
-    uint16x8_t predictor = vbslq_u16(vcgtq_s16(threshold, lo), c,
+    int16x8_t t = vsubq_s16(cb, vreinterpretq_s16_u16(a));
+    uint16x8_t predictor = vbslq_u16(vcgtq_s16(t, lo), c,
                                     vreinterpretq_u16_s16(hi));
-    predictor = vbslq_u16(vcgtq_s16(hi, threshold), predictor,
+    predictor = vbslq_u16(vcgtq_s16(hi, t), predictor,
                           vreinterpretq_u16_s16(lo));
-    return vandq_u16(vaddq_u16(s, predictor), vdupq_n_u16(255));
+    return vreinterpretq_u16_u8(vaddq_u8(vreinterpretq_u8_u16(s),
+                                         vreinterpretq_u8_u16(predictor)));
 }
 
-/* Clang uses a separate stride-selection wrapper. */
-#if defined(__clang__) || (defined(__linux__) && defined(__aarch64__) && \
-                          defined(__GNUC__))
-__attribute__((noinline))
-#endif
+/* Four-, six- and eight-byte pixels. Six-byte pixels load an eight-byte
+ * group that stays inside the row and store exactly one pixel, so
+ * overlapping and in-place rows remain correct. Scalar code keeps one- to
+ * three-byte pixels, whose independent byte chains it already overlaps. */
 static void ptpng_filter_paeth_neon(uint8_t *dst, const uint8_t *src,
                                    const uint8_t *prev, size_t count,
                                    unsigned bpp)
 {
     size_t i = 0;
     uint16x8_t a = vdupq_n_u16(0), c = vdupq_n_u16(0);
-#if defined(__GNUC__) && !defined(__clang__)
-    /* Preserve the measured GCC layout: four-byte pixels branch to the
-     * shared tail, while eight-byte pixels reach their loop directly. */
-    if (bpp == 4) {
-#else
     if (bpp == 8) {
         for (; i + 8 <= count; i += 8) {
             uint16x8_t b = vmovl_u8(vld1_u8(prev + i));
@@ -115,8 +113,17 @@ static void ptpng_filter_paeth_neon(uint8_t *dst, const uint8_t *src,
             c = b;
             vst1_u8(dst + i, vmovn_u16(a));
         }
+    } else if (bpp == 6) {
+        for (; i + 8 <= count; i += 6) {
+            uint16x8_t b = vmovl_u8(vld1_u8(prev + i));
+            uint16x8_t s = vmovl_u8(vld1_u8(src + i));
+            uint8_t out[8];
+            a = paeth_pixel_neon(s, a, b, c);
+            c = b;
+            vst1_u8(out, vmovn_u16(a));
+            memcpy(dst + i, out, 6);
+        }
     } else if (bpp == 4) {
-#endif
         for (; i + 4 <= count; i += 4) {
             uint32_t sv, bv, output;
             uint16x8_t b, s;
@@ -130,26 +137,10 @@ static void ptpng_filter_paeth_neon(uint8_t *dst, const uint8_t *src,
             output = vget_lane_u32(vreinterpret_u32_u8(vmovn_u16(a)), 0);
             memcpy(dst + i, &output, 4);
         }
-#if defined(__GNUC__) && !defined(__clang__)
-        goto tail;
-    }
-    if (bpp != 8) {
-#else
     } else {
-#endif
         ptpng_filter_paeth_scalar(dst, src, prev, count, bpp);
         return;
     }
-#if defined(__GNUC__) && !defined(__clang__)
-    for (; i + 8 <= count; i += 8) {
-        uint16x8_t b = vmovl_u8(vld1_u8(prev + i));
-        uint16x8_t s = vmovl_u8(vld1_u8(src + i));
-        a = paeth_pixel_neon(s, a, b, c);
-        c = b;
-        vst1_u8(dst + i, vmovn_u16(a));
-    }
-tail:
-#endif
     for (; i < count; i++) {
         int left = i >= bpp ? dst[i - bpp] : 0;
         int up = prev[i], upper_left = i >= bpp ? prev[i - bpp] : 0;
@@ -159,21 +150,6 @@ tail:
         dst[i] = (uint8_t)(src[i] + predictor);
     }
 }
-
-
-#if defined(__clang__)
-static void ptpng_filter_paeth_neon_dispatch(uint8_t *dst, const uint8_t *src,
-                                            const uint8_t *prev, size_t count,
-                                            unsigned bpp)
-{
-    /* Clang favors scalar four-byte chains. GCC retains SIMD because
-     * its scalar fourth-channel branch slows random-alpha images. */
-    if (bpp == 4)
-        ptpng_filter_paeth_scalar(dst, src, prev, count, bpp);
-    else
-        ptpng_filter_paeth_neon(dst, src, prev, count, bpp);
-}
-#endif
 
 /* Collect byte columns in independent 16-bit sums, then apply positional
  * weights once per chunk. A column reaches at most 32*255=8160; the full
@@ -526,11 +502,7 @@ void ptpng_neon_init(void)
     ptpng_cpu.filter_sub = ptpng_filter_sub_neon;
     ptpng_cpu.adler32 = ptpng_adler32_neon;
     ptpng_cpu.filter_up = ptpng_filter_up_neon;
-#if defined(__clang__)
-    ptpng_cpu.filter_paeth = ptpng_filter_paeth_neon_dispatch;
-#else
     ptpng_cpu.filter_paeth = ptpng_filter_paeth_neon;
-#endif
     ptpng_cpu.cvt_table_rgba8 = ptpng_cvt_table_rgba8_neon;
     ptpng_cpu.cvt_table_rgb8 = ptpng_cvt_table_rgb8_neon;
     ptpng_cvt_table_rgba8_neon[(0 << 4) | 3] = rgba8_g8_neon;
