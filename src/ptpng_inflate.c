@@ -544,9 +544,13 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                             /* Each 16-byte source chunk ends at or before
                              * its destination, so it is already decoded. */
                             COPY16(dst, src);
-                            while (dst + 16 < end) {
-                                dst += 16; src += 16;
-                                COPY16(dst, src);
+                            if (len > 16) {
+                                COPY16(dst + 16, src + 16);
+                                while (dst + 32 < end) {
+                                    dst += 32; src += 32;
+                                    COPY16(dst, src);
+                                    COPY16(dst + 16, src + 16);
+                                }
                             }
                         } else if (dist >= 8) {
                             do {
@@ -554,13 +558,17 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                                 dst += 8; src += 8;
                             } while (dst < end);
                         } else if (dist == 1) {
-                            uint64_t v = (uint64_t)src[0] *
-                                         UINT64_C(0x0101010101010101);
-                            do {
+                            if (len > 32) {
+                                /* long runs: the C library's fill is widest */
+                                memset(dst, src[0], len);
+                            } else {
+                                uint64_t v = (uint64_t)src[0] *
+                                             UINT64_C(0x0101010101010101);
                                 STORE64LE(dst, v);
                                 STORE64LE(dst + 8, v);
-                                dst += 16;
-                            } while (dst < end);
+                                STORE64LE(dst + 16, v);
+                                STORE64LE(dst + 24, v);
+                            }
                         } else {
                             /* The first dist loaded bytes are decoded; each
                              * step therefore extends the pattern by dist. */
