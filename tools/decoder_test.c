@@ -813,7 +813,7 @@ static void test_match_copies(void)
     }
 }
 
-int main(void)
+static void run_all(void)
 {
     test_metadata();
     test_invalid_metadata();
@@ -832,6 +832,20 @@ int main(void)
     test_fixed_dynamic_fallback();
     test_expanding_fixed_matches();
     test_match_copies();
+}
+
+int main(void)
+{
+    run_all();
+#if PTPNG_X86
+    /* Repeat with the generic inflater when the BMI2 build is selected. */
+    ptpng_cpu_init();
+    if (ptpng_cpu.bmi2) {
+        ptpng_cpu.bmi2 = 0;
+        run_all();
+        ptpng_cpu.bmi2 = 1;
+    }
+#endif
     if (failures) return 1;
     puts("decoder: metadata, limits, and malformed chunk regressions OK");
     return 0;

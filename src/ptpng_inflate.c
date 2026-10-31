@@ -19,8 +19,21 @@
  *    bounds and truncation checks.
  *  - The PNG caller knows the exact uncompressed size; we decode
  *    directly into the final buffer and verify the adler32.
+ *  - On x86, ptpng_inflate_bmi2.c compiles this file again for BMI2, whose
+ *    flag-free variable shifts shorten the bit-buffer dependency chain on
+ *    Intel cores. That copy defines PTPNG_INFLATE_BMI2 and exports only
+ *    the two decoding entries, suffixed _bmi2; the generic entries call
+ *    them when the CPU supports AVX2 and BMI2.
  */
 #include "ptpng_internal.h"
+
+#define INFLATE_CAT2(a, b) a##b
+#define INFLATE_CAT(a, b) INFLATE_CAT2(a, b)
+#ifdef PTPNG_INFLATE_BMI2
+#define INFLATE_EXPORT(name) INFLATE_CAT(name, _bmi2)
+#else
+#define INFLATE_EXPORT(name) name
+#endif
 
 #define LITLEN_ROOT   10
 #define LITLEN_SIZE   (1u << LITLEN_ROOT)
@@ -698,26 +711,52 @@ block_done:
 #else
 #define INFLATE_PUBLIC ptpng_inflate
 #endif
-int INFLATE_PUBLIC(const uint8_t *in, size_t in_len, uint8_t *out,
-                  size_t out_len, uint32_t flags)
+#if PTPNG_HAVE_INFLATE_BMI2 && !defined(PTPNG_INFLATE_BMI2)
+int INFLATE_CAT(INFLATE_PUBLIC, _bmi2)(const uint8_t *in, size_t in_len,
+                                      uint8_t *out, size_t out_len,
+                                      uint32_t flags);
+int ptpng_inflate_sink_bmi2(const uint8_t *in, size_t in_len, uint8_t *out,
+                            size_t out_len, uint32_t flags,
+                            struct ptpng_inflate_sink *sink);
+/* Initialization is idempotent; tests clear bmi2 afterwards to cover the
+ * generic build on the same machine. */
+#define INFLATE_USE_BMI2() (ptpng_cpu_init(), ptpng_cpu.avx2 && ptpng_cpu.bmi2)
+#else
+#define INFLATE_USE_BMI2() 0
+#endif
+
+int INFLATE_EXPORT(INFLATE_PUBLIC)(const uint8_t *in, size_t in_len,
+                                   uint8_t *out, size_t out_len,
+                                   uint32_t flags)
 {
     size_t produced;
     if (!in || !out || out_len == 0)
         return PTPNG_E_BAD_ARG;
+#if PTPNG_HAVE_INFLATE_BMI2 && !defined(PTPNG_INFLATE_BMI2)
+    if (INFLATE_USE_BMI2())
+        return INFLATE_CAT(INFLATE_PUBLIC, _bmi2)(in, in_len, out, out_len,
+                                                  flags);
+#endif
     return inflate_impl(in, in_len, out, out_len, flags, 1, &produced, NULL);
 }
-#undef INFLATE_PUBLIC
 
-int ptpng_inflate_sink(const uint8_t *in, size_t in_len, uint8_t *out,
-                       size_t out_len, uint32_t flags,
-                       struct ptpng_inflate_sink *sink)
+int INFLATE_EXPORT(ptpng_inflate_sink)(const uint8_t *in, size_t in_len,
+                                       uint8_t *out, size_t out_len,
+                                       uint32_t flags,
+                                       struct ptpng_inflate_sink *sink)
 {
     size_t produced;
     if (!in || !out || out_len == 0 || !sink)
         return PTPNG_E_BAD_ARG;
+#if PTPNG_HAVE_INFLATE_BMI2 && !defined(PTPNG_INFLATE_BMI2)
+    if (INFLATE_USE_BMI2())
+        return ptpng_inflate_sink_bmi2(in, in_len, out, out_len, flags, sink);
+#endif
     return inflate_impl(in, in_len, out, out_len, flags, 1, &produced, sink);
 }
+#undef INFLATE_PUBLIC
 
+#ifndef PTPNG_INFLATE_BMI2
 #if !INFLATE_FIXED_STREAM
 int ptpng_inflate_prefers_fixed(const uint8_t *in, size_t in_len,
                                 size_t out_len)
@@ -826,3 +865,4 @@ int ptpng_try_inflate_stored(const struct ptpng_inflate_chunk *chunks,
     if (!(flags & PTPNG_INF_NO_ADLER) && ptpng_adler32(out, out_len) != want) return 0;
     return 1;
 }
+#endif /* !PTPNG_INFLATE_BMI2 */
