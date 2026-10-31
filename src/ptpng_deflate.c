@@ -93,6 +93,20 @@ PTPNG_API_INLINE unsigned deflate_log2(unsigned value)
 #endif
 }
 
+#ifndef DEFLATE_PREFETCH_AHEAD
+#define DEFLATE_PREFETCH_AHEAD 8
+#endif
+#if defined(__GNUC__) || defined(__clang__)
+#define DEFLATE_PREFETCH(p) __builtin_prefetch(p)
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#define DEFLATE_PREFETCH(p) _mm_prefetch((const char *)(p), _MM_HINT_T0)
+#elif defined(_MSC_VER) && defined(_M_ARM64)
+#define DEFLATE_PREFETCH(p) __prefetch(p)
+#else
+#undef DEFLATE_PREFETCH_AHEAD
+#define DEFLATE_PREFETCH_AHEAD 0
+#endif
+
 /* Bounded per-call state. Token-limited blocks avoid large headers on
  * repetitive data while adapting the trees to changing image statistics. */
 #define DEFLATE_HASH_BITS 16
@@ -197,6 +211,21 @@ PTPNG_API_INLINE uint32_t deflate_insert(deflate_state *state,
          * hashes. Mask before multiplying: bytes six and seven must not
          * affect the existing six-byte hash or its candidate ordering. */
         memcpy(&word, src + pos, sizeof(word));
+#if DEFLATE_PREFETCH_AHEAD
+        /* Every position is inserted in order. Request the buckets that a
+         * later insertion will read, hiding their cache misses behind the
+         * intervening match searches. Only timing depends on this. */
+        if (size - pos >= DEFLATE_PREFETCH_AHEAD + 8) {
+            uint64_t ahead;
+            memcpy(&ahead, src + pos + DEFLATE_PREFETCH_AHEAD, sizeof(ahead));
+            DEFLATE_PREFETCH(&state->short_head[
+                (((uint32_t)ahead & UINT32_C(0x00ffffff)) * UINT32_C(2654435761)) >>
+                (32 - DEFLATE_HASH_BITS)]);
+            DEFLATE_PREFETCH(&state->head[
+                ((ahead & UINT64_C(0x0000ffffffffffff)) *
+                 UINT64_C(0x9e3779b97f4a7c15)) >> (64 - DEFLATE_HASH_BITS)]);
+        }
+#endif
         short_value = (uint32_t)word & UINT32_C(0x00ffffff);
         short_hash = (short_value * UINT32_C(2654435761)) >>
                      (32 - DEFLATE_HASH_BITS);
