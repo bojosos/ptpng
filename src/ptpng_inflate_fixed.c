@@ -3,11 +3,7 @@
 #include "ptpng_internal.h"
 
 #ifndef INFLATE_FIXED_STREAM
-#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64)
 #define INFLATE_FIXED_STREAM 1
-#else
-#define INFLATE_FIXED_STREAM 0
-#endif
 #endif
 
 #if INFLATE_FIXED_STREAM

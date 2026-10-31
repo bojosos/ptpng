@@ -1455,7 +1455,6 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
         rc = PTPNG_E_OUT_OF_MEMORY;
         goto fail_cleanup;
     }
-#if defined(__linux__)
     if (prof) P2 = pt_tsc();
     /* Stored streams can copy straight from fragmented IDAT payloads.
      * Everything else retains the general inflater and its error handling. */
@@ -1466,7 +1465,6 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
         idat_refs = NULL;
         goto inflated;
     }
-#endif
     if (n_idat_refs == 1) {
         idat_first = idat_refs[0].p;
     } else if (n_idat_refs > 1) {
@@ -1522,9 +1520,7 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
                 ptpng_info_free(&linfo);
                 return rc;
             }
-#if defined(__linux__)
 inflated:
-#endif
             if (getenv("PTPNG_DUMP_RAW")) {
                 FILE *df = fopen(getenv("PTPNG_DUMP_RAW"), "wb");
                 if (df) { fwrite(raw, 1, (size_t)raw_size, df); fclose(df); }
