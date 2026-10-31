@@ -4,6 +4,93 @@ ptpng targets fast single-threaded PNG decoding on x86 AVX2 and ARM64
 NEON. A kernel benchmark measures one operation; it does not establish
 the speed of a complete PNG decode or a lead over every other decoder.
 
+## 31 October follow-up
+
+### Nightly review
+
+Nightlies from 18 to 31 October all ran `eb0a2ab` and passed. Linux x64
+fell from 27/27 to 23/27 decode wins against libpng with zlib-ng without
+a ptpng change. The `ubuntu-latest` image moved from GCC 13.3 to GCC 15.2
+on 21 October. On the same EPYC 7763, the
+[GCC 13](https://github.com/bojosos/ptpng/actions/runs/39391462980) and
+[GCC 15](https://github.com/bojosos/ptpng/actions/runs/40474806797) nights
+leave ptpng within a few percent while the reference gains 8% on RGBA8
+photos, 28% on RGB graphics, 29% on noise and 57% on RGBA16 photos.
+RGB-graphics decoding also depends on the runner CPU: 0.81-0.84x on EPYC
+7763 and 1.18-1.19x on EPYC 9V45. Runner metadata now records the C
+compiler that CMake detected. The paired workflow pins `ubuntu-24.04`, so
+its Linux comparisons still use GCC 13.3.
+
+Token statistics explain the photo workloads. The RGB photo is 99.7%
+matches averaging 9.8 bytes, mostly from the row above; Gray8 matches
+average 4.5 bytes. Per-match decode cost therefore dominates.
+
+### Retained changes
+
+| Change | Effect |
+| --- | --- |
+| Bounds-free inflate fast loop: one branchless refill per match or four literals, code and extra bits consumed from one table entry, and 16/8-byte, broadcast or pattern-extending match copies inside 32/320-byte input/output slack | Photo decoding 7-38% faster on all five platforms in the [first screen](https://github.com/bojosos/ptpng/actions/runs/41198494549) |
+| Zero-residual Paeth rows copy the row above on every compiler and stride, with SSE2/NEON scans (previously Linux GCC ARM64 and eight-byte pixels only) | RGBA16-graphics decoding 1.9-4.4x on x64, macOS and Windows ARM64 |
+| Fused decoding: rows are checksummed and unfiltered once inflation is a full window past them, while they are still cached | Graphics decoding 10-20% faster on x64 |
+| Fixed-Huffman stream decoder and direct stored-IDAT copies on every platform (previously MSVC x64 and Linux only) | Noise decoding 1.59x on macOS and 1.39x on Windows ARM64 |
+| Paeth SIMD with a shorter dependency chain (3c - b formed early, byte add instead of add and mask); x64 adds three- and six-byte pixels, NEON adds six-byte pixels and Clang four-byte pixels | x64 kernel 1.3-4.3x per stride; RGB-graphics decoding 1.47x on Windows x64 |
+| Packed palette words for 8-bit palette to RGBA8 without the AVX2 gather; the packed table covers all 256 indices | Fixes transparent output for out-of-range indices on AVX2 |
+| BMI2 copy of the general inflater, selected at run time on x86 | 1-2% on EPYC 7763 Linux; 4-9% locally on Raptor Lake |
+| Inflation reads fragmented IDAT payloads in place instead of concatenating them | Removes a compressed-size allocation and copy per decode |
+| Encoder prefetches hash buckets after literals | RGBA16-photo encoding 6-8% and noise 4-12% faster; output unchanged |
+| AArch64 fills distance-one runs with inline vector stores | ARM graphics decoding up to 4.6% faster |
+
+The [final paired comparison](https://github.com/bojosos/ptpng/actions/runs/41207364402)
+against `eb0a2ab` uses nine alternating half-second pairs per workload:
+
+| Platform | Runner | Decode, 14 cases | Encode, 9 images | All pairs faster | All pairs slower |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Linux x64 | EPYC 9V74, GCC 13.3 | 1.291x | 1.020x | 16/23 | 2/23 |
+| Linux ARM64 | Neoverse N2, GCC 13.3 | 1.100x | 1.014x | 11/23 | 4/23 |
+| macOS ARM64 | M1 (virtual), AppleClang 15 | 1.321x | 1.008x | 10/23 | 1/23 |
+| Windows x64 | EPYC 7763, MSVC 19.51 | 1.282x | 1.023x | 12/23 | 0/23 |
+| Windows ARM64 | Cobalt 100, MSVC 19.51 | 1.245x | 1.017x | 14/23 | 0/23 |
+
+Native RGB-photo decoding improves 1.27-1.57x and RGBA8 photos
+1.18-1.28x on every platform. PNG bytes are unchanged.
+
+Remaining losses, with every pair slower: Linux ARM64 palette, RGB and
+RGBA16 graphics decoding at 0.959x, 0.889x and 0.976x; Linux x64 RGB and
+Gray16 photo encoding at 0.992x and 0.990x; macOS RGB-graphics encoding at
+0.977x. Graphics encoding on EPYC 7763 switches between about 111 and
+90 MPix/s with unrelated code placement; neither 64-byte function
+alignment nor 32/64-byte loop alignment fixed it. On EPYC 9V45 the vector
+three-byte Paeth does not beat scalar code, and RGB graphics stays near
+parity there.
+
+### Rejected experiments
+
+| Experiment | Evidence | Reason |
+| --- | --- | --- |
+| Row-above match candidate before the hash chain | Local sizes and chain counts | Same chain steps on photos; graphics grew 4.8x until equal-length closer matches were preferred, then no speedup |
+| Stop the chain after a good match, or 32-step chains | Local sizes | RGB-photo PNG 0.3-3.4% larger for 17-42% fewer steps |
+| Lazy-match limit 16 or 32 | Local | No speed or size effect |
+| Prefetch on every insertion, 8 or 16 positions ahead | [8](https://github.com/bojosos/ptpng/actions/runs/41203649483), [16](https://github.com/bojosos/ptpng/actions/runs/41203651835) | RGB-graphics encoding 0.68-0.77x everywhere |
+| 256 KiB fused-decoding step | [41203241710](https://github.com/bojosos/ptpng/actions/runs/41203241710) | Neutral |
+| `-falign-functions=64`, plus 32/64-byte loop alignment | [functions](https://github.com/bojosos/ptpng/actions/runs/41203243777), [loops 32](https://github.com/bojosos/ptpng/actions/runs/41203829745), [loops 64](https://github.com/bojosos/ptpng/actions/runs/41203835064) | EPYC 7763 graphics encoding 0.80x; EPYC 9V45 0.93x |
+| Disabling the MSVC fixed-stream decoder after the fast loop | Local | Noise 0.79x |
+| `memset` for long distance-one runs on AArch64 | [41206294458](https://github.com/bojosos/ptpng/actions/runs/41206294458) | Inline stores are up to 4.6% faster on ARM; x64 keeps `memset` |
+
+### Correctness
+
+`ctest` and the full CI matrix, including ASan/UBSan on x64 and ARM64,
+pass on the [final revision](https://github.com/bojosos/ptpng/actions/runs/41207366445).
+A differential harness compared the final decoder with `eb0a2ab` on
+14,800 generated and mutated PNGs, covering every zlib level and strategy,
+flushed blocks, short-period patterns, invalid filter bytes and IDAT
+splits into empty and 1-300 byte chunks. Status, message and pixels match,
+except for two truncated streams that zlib confirms are incomplete: the
+old four-literal batch decoded past the end and reported corruption, and
+the new decoder reports truncation. New regressions cover out-of-range
+palette indices, Huffman streams split into tiny IDAT chunks, three- and
+six-byte Paeth dispatch, and every decoder regression on both the generic
+and BMI2 inflaters.
+
 ## 17 October nightly investigation
 
 The [nightly on `c7dfd64`](https://github.com/bojosos/ptpng/actions/runs/39013902174)
@@ -1503,8 +1590,9 @@ decoding and mutation fuzzing.
 
 ## Remaining performance work
 
-Average and the remaining scalar Paeth strides are candidates for SIMD
-on ARM and x86. Four-byte Paeth pixels now use SIMD on AVX2 CPUs.
+Average and the one- and two-byte Paeth strides are candidates for SIMD
+on ARM and x86. Since 31 October, Paeth uses SIMD for three- to eight-byte
+pixels on x64 and four- to eight-byte pixels on ARM64.
 CRC-32 now has runtime-detected PCLMUL and AArch64 CRC paths;
 parallel ARM CRC chains remain a candidate. Any replacement
 needs corpus measurements with checksum verification enabled and tests
