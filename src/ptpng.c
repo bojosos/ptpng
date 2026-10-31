@@ -378,7 +378,28 @@ static void rgba8_p##d(const uint8_t *src, uint8_t *dst, uint32_t n,      \
 PAL_TO_RGBA8(1)
 PAL_TO_RGBA8(2)
 PAL_TO_RGBA8(4)
-PAL_TO_RGBA8(8)
+
+/* 8-bit indices copy precombined RGBA entries: one word load and store
+ * per pixel instead of four byte lookups and a transparency test. */
+static void rgba8_p8(const uint8_t *src, uint8_t *dst, uint32_t n,
+                     const struct ptpng_cvt *c)
+{
+    const uint8_t *tab = c->pal_rgba;
+    uint32_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        uint32_t p0, p1, p2, p3;
+        memcpy(&p0, tab + (size_t)src[i] * 4, 4);
+        memcpy(&p1, tab + (size_t)src[i + 1] * 4, 4);
+        memcpy(&p2, tab + (size_t)src[i + 2] * 4, 4);
+        memcpy(&p3, tab + (size_t)src[i + 3] * 4, 4);
+        memcpy(dst + (size_t)i * 4, &p0, 4);
+        memcpy(dst + (size_t)i * 4 + 4, &p1, 4);
+        memcpy(dst + (size_t)i * 4 + 8, &p2, 4);
+        memcpy(dst + (size_t)i * 4 + 12, &p3, 4);
+    }
+    for (; i < n; i++)
+        memcpy(dst + (size_t)i * 4, tab + (size_t)src[i] * 4, 4);
+}
 
 static void rgba8_ga8(const uint8_t *src, uint8_t *dst, uint32_t n,
                       const struct ptpng_cvt *c)
@@ -1596,9 +1617,11 @@ inflated:
         cvt.reverse = (uint8_t)expand_in_place;
 #endif
         if (ct == 3) {
-            /* Packed entries serve RGB stores and the RGBA gather path. */
+            /* Packed entries serve RGB stores and the RGBA gather path.
+             * Out-of-range indices read the zeroed palette and stay
+             * opaque, as in the byte-wise converters and libpng. */
             unsigned pi;
-            for (pi = 0; pi < linfo.num_palette; pi++) {
+            for (pi = 0; pi < 256; pi++) {
                 cvt.pal_rgba[pi * 4 + 0] = linfo.palette[pi * 3 + 0];
                 cvt.pal_rgba[pi * 4 + 1] = linfo.palette[pi * 3 + 1];
                 cvt.pal_rgba[pi * 4 + 2] = linfo.palette[pi * 3 + 2];

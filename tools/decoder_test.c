@@ -380,6 +380,49 @@ static void test_palette_conversion_boundaries(void)
     }
 }
 
+/* Indices beyond PLTE read black and, without tRNS entries, stay opaque on
+ * every converter, including vector paths that use the packed table. */
+static void test_palette_out_of_range(void)
+{
+    static const unsigned char plte[6] = {10, 20, 30, 40, 50, 60};
+    static const unsigned char trns[1] = {7};
+    static const unsigned char sig[8] = {137,80,78,71,13,10,26,10};
+    unsigned char hdr[13] = {0,0,0,16, 0,0,0,1, 8,3,0,0,0};
+    unsigned char raw[17], zs[64];
+    unsigned i, rgba;
+    raw[0] = 0;
+    for (i = 0; i < 16; ++i) raw[1 + i] = (unsigned char)(i < 2 ? i : 2 + i * 15);
+    for (rgba = 0; rgba < 2; ++rgba) {
+        ptpng_opts opts;
+        void *out = NULL;
+        size_t len = 0;
+        unsigned channels = rgba ? 4 : 3;
+        memset(&opts, 0, sizeof(opts));
+        opts.output_format = rgba ? PTPNG_OUT_RGBA8 : PTPNG_OUT_RGB8;
+        opts.max_bytes = PTPNG_DEFAULT_MAX_BYTES;
+        memcpy(png_data, sig, 8);
+        png_size = 8;
+        chunk("IHDR", hdr, sizeof(hdr));
+        chunk("PLTE", plte, sizeof(plte));
+        chunk("tRNS", trns, sizeof(trns));
+        chunk("IDAT", zs, zstream(zs, raw, sizeof(raw)));
+        chunk("IEND", NULL, 0);
+        CHECK(ptpng_decode(png_data, png_size, &opts, &out, &len, NULL) == PTPNG_OK);
+        CHECK(len == 16 * channels);
+        if (out && len == 16 * channels) {
+            const unsigned char *px = (const unsigned char *)out;
+            for (i = 0; i < 16; ++i) {
+                const unsigned char *p = px + i * channels;
+                unsigned char want[4] = {0, 0, 0, 255};
+                if (i < 2) memcpy(want, plte + i * 3, 3);
+                if (i == 0) want[3] = 7;
+                CHECK(memcmp(p, want, channels) == 0);
+            }
+        }
+        ptpng_free(out);
+    }
+}
+
 static void test_mixed_blocks(void)
 {
     /* zlib-generated dynamic, fixed, stored, dynamic blocks, with sync
@@ -780,6 +823,7 @@ int main(void)
     test_rgb_expansion_transparency();
     test_color_conversion_boundaries();
     test_palette_conversion_boundaries();
+    test_palette_out_of_range();
     test_mixed_blocks();
     test_fragmented_stored_blocks();
     test_literal_boundaries();
