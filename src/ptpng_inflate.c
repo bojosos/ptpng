@@ -54,7 +54,7 @@
 /* Sink notifications: every SINK_STEP output bytes, for the bytes at least
  * one deflate window behind the current position. */
 #define SINK_WINDOW 32768
-#define SINK_STEP   65536
+#define SINK_STEP   262144
 
 #define SINK_NOTIFY()                                                       do {                                                                        if (pos >= next_sink) {                                                     sink->progress(sink, pos - SINK_WINDOW, 0);                             next_sink = pos + SINK_STEP;                                        }                                                                   } while (0)
 
