@@ -68,7 +68,7 @@ jobs:
         run: ./build/verify_suite tests/bench
 
       - name: Record benchmark machine
-        run: python tools/bench_metadata.py machine_${{ matrix.name }}.json
+        run: python tools/bench_metadata.py machine_${{ matrix.name }}.json build
 
       - name: Benchmark vs libpng (zlib) and libpng (zlib-ng)
         run: |
