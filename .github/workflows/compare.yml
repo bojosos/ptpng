@@ -78,7 +78,7 @@ jobs:
           mkdir -p paired-results
           git rev-parse HEAD > paired-results/candidate.txt
           git -C baseline rev-parse HEAD > paired-results/baseline.txt
-          python tools/bench_metadata.py paired-results/machine.json
+          python tools/bench_metadata.py paired-results/machine.json build_paired
           suffix=''
           if [ "$RUNNER_OS" = Windows ]; then suffix='.exe'; fi
           cp "build_baseline/profile_png$suffix" "paired-results/baseline$suffix"

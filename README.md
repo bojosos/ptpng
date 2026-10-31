@@ -188,6 +188,14 @@ Its isolated fixed-Huffman decoder preserves the existing general decoder's
 layout. Linux refill and encoder experiments remain excluded after full
 comparisons expose losses on other workloads.
 
+The [31 October follow-up](PERFORMANCE.md#31-october-follow-up) rewrites
+the inflater's hot loop and checksums and unfilters rows while inflation
+is still in cache. Against the 17 October build, decoding is 1.10-1.32x
+faster by geometric mean over 14 cases on the five platforms, with RGB
+photos 1.27-1.57x and RGBA16 graphics up to 4.4x. Encoding is 1.01-1.02x
+with unchanged PNG bytes. Linux ARM64 graphics decoding and a few encoder
+cases remain slightly slower; see the full measurements.
+
 See [per-image times and file sizes](PERFORMANCE.md#30-september-benchmark-snapshot)
 or the [live dashboard](https://bojosos.github.io/ptpng/bench/) for all
 platforms, output formats and reference levels. The dashboard keeps full

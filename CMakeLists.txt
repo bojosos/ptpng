@@ -50,8 +50,20 @@ if(PTPNG_X86)
         set_source_files_properties(src/ptpng_crc_x86.c PROPERTIES
                                     COMPILE_OPTIONS "-mpclmul;-msse2")
     endif()
+    # BMI2 copy of the general inflater, selected at run time.
+    if(MSVC AND NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        set_source_files_properties(src/ptpng_inflate_bmi2.c PROPERTIES
+                                    COMPILE_OPTIONS "/arch:AVX2")
+    elseif(MSVC)
+        set_source_files_properties(src/ptpng_inflate_bmi2.c PROPERTIES
+                                    COMPILE_OPTIONS "/clang:-mbmi2")
+    else()
+        set_source_files_properties(src/ptpng_inflate_bmi2.c PROPERTIES
+                                    COMPILE_OPTIONS "-mbmi2")
+    endif()
+    target_compile_definitions(ptpng PRIVATE PTPNG_HAVE_INFLATE_BMI2=1)
     target_sources(ptpng PRIVATE src/ptpng_avx2.c src/ptpng_encode_avx2.c
-                                 src/ptpng_crc_x86.c)
+                                 src/ptpng_crc_x86.c src/ptpng_inflate_bmi2.c)
 elseif(PTPNG_ARM)
     # NEON is baseline on aarch64; no extra flags needed. ptpng_neon.c
     # compiles to an empty TU if NEON is unavailable (armv7 without it).

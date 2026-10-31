@@ -132,6 +132,23 @@ uint32_t ptpng_adler32(const uint8_t *p, size_t n)
     return ptpng_cpu.adler32(p, n);
 }
 
+/* Adler-32 of A followed by B from adler(A), adler(B) and B's length
+ * (zlib's adler32_combine). */
+uint32_t ptpng_adler32_combine(uint32_t a1, uint32_t a2, size_t len2)
+{
+    const uint64_t base = 65521;
+    uint64_t rem = len2 % base;
+    uint64_t sum1 = a1 & 0xffff;
+    uint64_t sum2 = (rem * sum1) % base;
+    sum1 += (a2 & 0xffff) + base - 1;
+    sum2 += ((a1 >> 16) & 0xffff) + ((a2 >> 16) & 0xffff) + base - rem;
+    if (sum1 >= base) sum1 -= base;
+    if (sum1 >= base) sum1 -= base;
+    if (sum2 >= base << 1) sum2 -= base << 1;
+    if (sum2 >= base) sum2 -= base;
+    return (uint32_t)(sum1 | (sum2 << 16));
+}
+
 const char *ptpng_version(void)
 {
     return "ptpng 1.1"
@@ -361,7 +378,28 @@ static void rgba8_p##d(const uint8_t *src, uint8_t *dst, uint32_t n,      \
 PAL_TO_RGBA8(1)
 PAL_TO_RGBA8(2)
 PAL_TO_RGBA8(4)
-PAL_TO_RGBA8(8)
+
+/* 8-bit indices copy precombined RGBA entries: one word load and store
+ * per pixel instead of four byte lookups and a transparency test. */
+static void rgba8_p8(const uint8_t *src, uint8_t *dst, uint32_t n,
+                     const struct ptpng_cvt *c)
+{
+    const uint8_t *tab = c->pal_rgba;
+    uint32_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        uint32_t p0, p1, p2, p3;
+        memcpy(&p0, tab + (size_t)src[i] * 4, 4);
+        memcpy(&p1, tab + (size_t)src[i + 1] * 4, 4);
+        memcpy(&p2, tab + (size_t)src[i + 2] * 4, 4);
+        memcpy(&p3, tab + (size_t)src[i + 3] * 4, 4);
+        memcpy(dst + (size_t)i * 4, &p0, 4);
+        memcpy(dst + (size_t)i * 4 + 4, &p1, 4);
+        memcpy(dst + (size_t)i * 4 + 8, &p2, 4);
+        memcpy(dst + (size_t)i * 4 + 12, &p3, 4);
+    }
+    for (; i < n; i++)
+        memcpy(dst + (size_t)i * 4, tab + (size_t)src[i] * 4, 4);
+}
 
 static void rgba8_ga8(const uint8_t *src, uint8_t *dst, uint32_t n,
                       const struct ptpng_cvt *c)
@@ -600,6 +638,128 @@ static void extract_pass_row_subbyte(uint8_t *dst_row, const uint8_t *src_row,
 
 /* ================= unfiltering ================= */
 
+/* An all-zero Paeth residual row reproduces the previous row: the first
+ * pixel predicts from above, and afterwards decoded-left equals upper-left,
+ * so every prediction selects above. Reject ordinary rows after one word. */
+static int paeth_row_is_zero(const uint8_t *p, size_t n)
+{
+    size_t i = 0;
+#if PTPNG_X64
+    if (n >= 16) {
+        const __m128i zero = _mm_setzero_si128();
+        if (_mm_movemask_epi8(_mm_cmpeq_epi8(
+                _mm_loadu_si128((const __m128i *)p), zero)) != 0xFFFF)
+            return 0;
+        for (i = 16; n - i >= 64; i += 64) {
+            __m128i v = _mm_or_si128(
+                _mm_or_si128(_mm_loadu_si128((const __m128i *)(p + i)),
+                             _mm_loadu_si128((const __m128i *)(p + i + 16))),
+                _mm_or_si128(_mm_loadu_si128((const __m128i *)(p + i + 32)),
+                             _mm_loadu_si128((const __m128i *)(p + i + 48))));
+            if (_mm_movemask_epi8(_mm_cmpeq_epi8(v, zero)) != 0xFFFF)
+                return 0;
+        }
+    }
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    if (n >= 16) {
+        if (vmaxvq_u8(vld1q_u8(p))) return 0;
+        for (i = 16; n - i >= 64; i += 64) {
+            uint8x16_t v = vorrq_u8(
+                vorrq_u8(vld1q_u8(p + i), vld1q_u8(p + i + 16)),
+                vorrq_u8(vld1q_u8(p + i + 32), vld1q_u8(p + i + 48)));
+            if (vmaxvq_u8(v)) return 0;
+        }
+    }
+#endif
+    if (i == 0 && n >= 8) {
+        uint64_t a;
+        memcpy(&a, p, 8);
+        if (a) return 0;
+        i = 8;
+    }
+    for (; n - i >= 32; i += 32) {
+        uint64_t a, b, c, d;
+        memcpy(&a, p + i, 8);
+        memcpy(&b, p + i + 8, 8);
+        memcpy(&c, p + i + 16, 8);
+        memcpy(&d, p + i + 24, 8);
+        if (a | b | c | d) return 0;
+    }
+    for (; i < n; i++)
+        if (p[i]) return 0;
+    return 1;
+}
+
+/* Reconstruct non-interlaced rows y0..y1-1, compacting them in place
+ * (filter bytes dropped). Rows before y0 are already reconstructed. */
+static int unfilter_rows(uint8_t *raw, size_t rb, unsigned bpp, uint32_t y0,
+                         uint32_t y1, const uint8_t *zeros)
+{
+    ptpng_filter_fn fsub = ptpng_cpu.filter_sub;
+    ptpng_filter_fn fup = ptpng_cpu.filter_up;
+    ptpng_filter_fn fpaeth = ptpng_cpu.filter_paeth;
+    uint32_t y;
+    for (y = y0; y < y1; y++) {
+        uint8_t *frow = raw + (size_t)y * (rb + 1);
+        unsigned f = frow[0];
+        uint8_t *dst = raw + (size_t)y * rb; /* compacted position */
+        const uint8_t *src = frow + 1;
+        const uint8_t *prev = y ? raw + (size_t)(y - 1) * rb : zeros;
+        if (f > 4)
+            return PTPNG_E_INFLATE_CORRUPT;
+        switch (f) {
+        case 0: memmove(dst, src, rb); break;
+        case 1: fsub(dst, src, prev, rb, bpp); break;
+        case 2: fup(dst, src, prev, rb, bpp); break;
+        case 3: ptpng_filter_avg_scalar(dst, src, prev, rb, bpp); break;
+        case 4:
+            /* dst trails src, but the scan finishes before any store */
+            if (paeth_row_is_zero(src, rb))
+                memcpy(dst, prev, rb);
+            else
+                fpaeth(dst, src, prev, rb, bpp);
+            break;
+        }
+    }
+    return PTPNG_OK;
+}
+
+/* Streams rows through checksum and reconstruction while inflation
+ * continues. A row is consumed only once inflation has moved 32 KiB past
+ * its end, so no later match can read its rewritten bytes; while it is
+ * still cached, the Adler sum covers its filtered bytes before compaction
+ * overwrites them. A filter error is kept until inflation finishes, which
+ * preserves the precedence of inflate errors such as a bad checksum. */
+struct row_sink {
+    struct ptpng_inflate_sink base;
+    uint8_t *raw;
+    const uint8_t *zeros;
+    size_t rb, adler_pos;
+    uint32_t h, y;
+    unsigned bpp;
+    int check_adler, err;
+};
+
+static void row_sink_progress(struct ptpng_inflate_sink *sink, size_t stable,
+                              int final)
+{
+    struct row_sink *r = (struct row_sink *)sink;
+    size_t stride = r->rb + 1;
+    uint32_t upto = final ? r->h : (uint32_t)(stable / stride);
+    size_t end = final ? stable : (size_t)upto * stride;
+    if (upto > r->h) upto = r->h;
+    if (r->check_adler && end > r->adler_pos) {
+        size_t n = end - r->adler_pos;
+        r->base.adler = ptpng_adler32_combine(
+            r->base.adler, ptpng_adler32(r->raw + r->adler_pos, n), n);
+        r->adler_pos = end;
+    }
+    if (!r->err && upto > r->y) {
+        r->err = unfilter_rows(r->raw, r->rb, r->bpp, r->y, upto, r->zeros);
+        r->y = upto;
+    }
+}
+
 /* Reconstruct scanlines in the raw (filtered) buffer.
  * non-interlaced: rows are compacted in place (filter bytes dropped).
  * interlaced: rows are reconstructed in place, filter bytes kept. */
@@ -615,26 +775,7 @@ static int unfilter_image(uint8_t *raw, uint32_t w, uint32_t h,
 
     if (!interlaced) {
         size_t rb = (size_t)((((uint64_t)w * bitpp) + 7) >> 3);
-        uint32_t y;
-        const uint8_t *prev = zeros;
-        for (y = 0; y < h; y++) {
-            uint8_t *frow = raw + (size_t)y * (rb + 1);
-            unsigned f = frow[0];
-            uint8_t *dst = raw + (size_t)y * rb; /* compacted position */
-            const uint8_t *src = frow + 1;
-            if (f > 4)
-                return PTPNG_E_INFLATE_CORRUPT;
-            if (y)
-                prev = raw + (size_t)(y - 1) * rb;
-            switch (f) {
-            case 0: memmove(dst, src, rb); break;
-            case 1: fsub(dst, src, prev, rb, bpp); break;
-            case 2: fup(dst, src, prev, rb, bpp); break;
-            case 3: ptpng_filter_avg_scalar(dst, src, prev, rb, bpp); break;
-            case 4: fpaeth(dst, src, prev, rb, bpp); break;
-            }
-        }
-        return PTPNG_OK;
+        return unfilter_rows(raw, rb, bpp, 0, h, zeros);
     } else {
         unsigned p;
         size_t off = 0;
@@ -662,7 +803,12 @@ static int unfilter_image(uint8_t *raw, uint32_t w, uint32_t h,
                 case 1: fsub(row, row, prev, rbp, bpp); break;
                 case 2: fup(row, row, prev, rbp, bpp); break;
                 case 3: ptpng_filter_avg_scalar(row, row, prev, rbp, bpp); break;
-                case 4: fpaeth(row, row, prev, rbp, bpp); break;
+                case 4:
+                    if (paeth_row_is_zero(row, rbp))
+                        memcpy(row, prev, rbp);
+                    else
+                        fpaeth(row, row, prev, rbp, bpp);
+                    break;
                 }
                 prev = row;
             }
@@ -1330,7 +1476,6 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
         rc = PTPNG_E_OUT_OF_MEMORY;
         goto fail_cleanup;
     }
-#if defined(__linux__)
     if (prof) P2 = pt_tsc();
     /* Stored streams can copy straight from fragmented IDAT payloads.
      * Everything else retains the general inflater and its error handling. */
@@ -1341,48 +1486,81 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
         idat_refs = NULL;
         goto inflated;
     }
-#endif
-    if (n_idat_refs == 1) {
-        idat_first = idat_refs[0].p;
-    } else if (n_idat_refs > 1) {
-        size_t off = 0, i;
-        idat_buf = (uint8_t *)malloc(idat_total);
-        if (!idat_buf) {
-            free(raw); free(zeros);
-            rc = PTPNG_E_OUT_OF_MEMORY;
-            goto fail_cleanup;
-        }
-        for (i = 0; i < n_idat_refs; i++) {
-            memcpy(idat_buf + off, idat_refs[i].p, idat_refs[i].len);
-            off += idat_refs[i].len;
-        }
-    }
-    free(idat_refs);
-    idat_refs = NULL;
-    if (prof) P2 = pt_tsc();
-
     {
-        const uint8_t *zin = idat_buf ? idat_buf : idat_first;
         uint32_t ifl = (opts->flags & PTPNG_FLAG_NO_VERIFY_ADLER)
                            ? PTPNG_INF_NO_ADLER : 0;
-        rc = ptpng_inflate(zin ? zin : (const uint8_t *)"", idat_total, raw,
-                           (size_t)raw_size, ifl);
-        free(idat_buf);
-        if (rc) {
-            free(raw); free(zeros);
-            ptpng_info_free(&linfo);
-            return rc;
+        /* The fused path reads the IDAT payloads in place. Interlaced
+         * images, raw dumps and streams for the separate fixed decoder
+         * concatenate them first. */
+        uint8_t head[3] = {0, 0, 0};
+        size_t got = 0, i;
+        for (i = 0; i < n_idat_refs && got < 3; i++) {
+            size_t k;
+            for (k = 0; k < idat_refs[i].len && got < 3; k++)
+                head[got++] = idat_refs[i].p[k];
         }
-#if defined(__linux__)
+        if (!interlace && !getenv("PTPNG_DUMP_RAW") &&
+            !ptpng_inflate_prefers_fixed(head, idat_total, (size_t)raw_size)) {
+            struct row_sink sink;
+            if (prof) P2 = pt_tsc();
+            memset(&sink, 0, sizeof(sink));
+            sink.base.progress = row_sink_progress;
+            sink.base.adler = 1;
+            sink.raw = raw;
+            sink.zeros = zeros;
+            sink.rb = (size_t)rb;
+            sink.h = h;
+            sink.bpp = (channels_of(ct) * depth + 7) >> 3;
+            sink.check_adler = !(ifl & PTPNG_INF_NO_ADLER);
+            rc = ptpng_inflate_sink(idat_refs, n_idat_refs, raw,
+                                    (size_t)raw_size, ifl, &sink.base);
+            free(idat_refs);
+            idat_refs = NULL;
+            if (rc) {
+                free(raw); free(zeros);
+                ptpng_info_free(&linfo);
+                return rc;
+            }
+            rc = sink.err;
+            if (prof) P3 = pt_tsc();
+        } else {
+            const uint8_t *zin;
+            if (n_idat_refs == 1) {
+                idat_first = idat_refs[0].p;
+            } else if (n_idat_refs > 1) {
+                size_t off = 0;
+                idat_buf = (uint8_t *)malloc(idat_total);
+                if (!idat_buf) {
+                    free(raw); free(zeros);
+                    rc = PTPNG_E_OUT_OF_MEMORY;
+                    goto fail_cleanup;
+                }
+                for (i = 0; i < n_idat_refs; i++) {
+                    memcpy(idat_buf + off, idat_refs[i].p, idat_refs[i].len);
+                    off += idat_refs[i].len;
+                }
+            }
+            free(idat_refs);
+            idat_refs = NULL;
+            if (prof) P2 = pt_tsc();
+            zin = idat_buf ? idat_buf : idat_first;
+            rc = ptpng_inflate(zin ? zin : (const uint8_t *)"", idat_total,
+                               raw, (size_t)raw_size, ifl);
+            free(idat_buf);
+            if (rc) {
+                free(raw); free(zeros);
+                ptpng_info_free(&linfo);
+                return rc;
+            }
 inflated:
-#endif
-        if (getenv("PTPNG_DUMP_RAW")) {
-            FILE *df = fopen(getenv("PTPNG_DUMP_RAW"), "wb");
-            if (df) { fwrite(raw, 1, (size_t)raw_size, df); fclose(df); }
+            if (getenv("PTPNG_DUMP_RAW")) {
+                FILE *df = fopen(getenv("PTPNG_DUMP_RAW"), "wb");
+                if (df) { fwrite(raw, 1, (size_t)raw_size, df); fclose(df); }
+            }
+            rc = unfilter_image(raw, w, h, depth, channels_of(ct),
+                                (int)interlace, zeros);
+            if (prof) P3 = pt_tsc();
         }
-        rc = unfilter_image(raw, w, h, depth, channels_of(ct), (int)interlace,
-                            zeros);
-        if (prof) P3 = pt_tsc();
     }
     free(zeros);
     if (rc) {
@@ -1450,9 +1628,11 @@ inflated:
         cvt.reverse = (uint8_t)expand_in_place;
 #endif
         if (ct == 3) {
-            /* Packed entries serve RGB stores and the RGBA gather path. */
+            /* Packed entries serve RGB stores and the RGBA gather path.
+             * Out-of-range indices read the zeroed palette and stay
+             * opaque, as in the byte-wise converters and libpng. */
             unsigned pi;
-            for (pi = 0; pi < linfo.num_palette; pi++) {
+            for (pi = 0; pi < 256; pi++) {
                 cvt.pal_rgba[pi * 4 + 0] = linfo.palette[pi * 3 + 0];
                 cvt.pal_rgba[pi * 4 + 1] = linfo.palette[pi * 3 + 1];
                 cvt.pal_rgba[pi * 4 + 2] = linfo.palette[pi * 3 + 2];
