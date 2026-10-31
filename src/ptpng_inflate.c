@@ -10,12 +10,13 @@
  *    subtable arenas for codes longer than the root; entries precompute
  *    length/distance bases and extra-bit counts so decoding is
  *    load/shift/add with no symbol post-processing.
- *  - Four-literal fast path: up to four literals decoded per refill with one
- *    bounds check; matches/EOB/subtables take the generic path.
- *  - Match copy: 8x64-bit move blocks when dist >= 64, 4x64-bit when
- *    dist >= 32 (32-byte blocks are overlap-safe exactly then), and
- *    periodic pattern replication through a 64-byte scratch for smaller
- *    distances.
+ *  - Fast loop while input/output slack remains: one branchless refill per
+ *    match or per four literals, no per-symbol bounds checks, and match
+ *    copies in 16-byte (dist >= 16), 8-byte (dist >= 8), broadcast
+ *    (dist 1) or pattern-extending (dist 2..7) steps that may overrun the
+ *    match end inside the slack.
+ *  - A careful single-symbol path handles the stream ends with exact
+ *    bounds and truncation checks.
  *  - The PNG caller knows the exact uncompressed size; we decode
  *    directly into the final buffer and verify the adler32.
  */
@@ -24,12 +25,6 @@
 #define LITLEN_ROOT   10
 #define LITLEN_SIZE   (1u << LITLEN_ROOT)
 #define LITLEN_ARENA  2048
-#if defined(__linux__) && defined(__aarch64__) && defined(__GNUC__) && \
-    !defined(__clang__)
-#define INFLATE_BATCH_BIT_GUARD 1
-#else
-#define INFLATE_BATCH_BIT_GUARD 0
-#endif
 #ifndef INFLATE_FIXED_STREAM
 #if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64)
 #define INFLATE_FIXED_STREAM 1
@@ -43,9 +38,23 @@
 #define CL_ROOT       7
 #define CL_SIZE       (1u << CL_ROOT)
 
-#define F_LIT       0x80000000u   /* literal: byte in bits 8..15        */
-#define F_EOB       0x40000000u   /* end of block symbol 256            */
-#define F_SUB       0x20000000u   /* subtable ref: off<<8, bits in 24..27 */
+/* Decode table entries:
+ *   bits 0..7   bits consumed: code length plus extra bits
+ *   bits 8..11  code length (extra bits follow it); subtable index bits
+ *   bit  12     F_SUB  subtable pointer: arena offset in bits 16..30
+ *   bit  13     F_EOB  end of block
+ *   bit  14     F_BAD  invalid or unused code
+ *   bits 16..30 literal byte, length base, distance base or CL symbol
+ *   bit  31     F_LIT  literal (also CL symbols)
+ * Consuming bits 0..7 at once lets extra bits come from a saved copy of
+ * the bit buffer instead of a second dependent shift. */
+#define F_LIT       0x80000000u
+#define F_BAD       0x00004000u
+#define F_EOB       0x00002000u
+#define F_SUB       0x00001000u
+#define F_EXC       (F_BAD | F_EOB | F_SUB)
+#define FAST_IN_MARGIN  32
+#define FAST_OUT_MARGIN 320
 
 static const uint16_t len_base_tab[29] = {
     3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,
@@ -86,6 +95,34 @@ PTPNG_API_INLINE uint32_t rev_bits(uint32_t v, unsigned n)
 /* scratch shared by builds (single-threaded by contract) */
 static uint32_t sym_code[320];
 
+static void fill_bad(uint32_t *t, unsigned n)
+{
+    unsigned i;
+    for (i = 0; i < n; i++)
+        t[i] = F_BAD;
+}
+
+/* Entry for symbol i whose remaining code length in this table is cl. */
+static uint32_t make_entry(int kind, unsigned i, unsigned cl)
+{
+    if (kind == 1) {
+        if (i < 30)
+            return ((uint32_t)dist_base_tab[i] << 16) | (cl << 8) |
+                   (cl + dist_extra_tab[i]);
+        return F_BAD | cl; /* symbols 30/31 are invalid */
+    }
+    if (kind == 2 || i < 256)
+        return F_LIT | ((uint32_t)i << 16) | cl;
+    if (i == 256)
+        return F_EOB | cl;
+    if (i < 286) {
+        unsigned s = i - 257;
+        return ((uint32_t)len_base_tab[s] << 16) | (cl << 8) |
+               (cl + len_extra_tab[s]);
+    }
+    return F_BAD | cl; /* symbols 286/287 are invalid */
+}
+
 /*
  * Build one Huffman decode table.
  *   root     : root table, 1 << root_bits entries
@@ -119,7 +156,7 @@ static int build_table(uint32_t *root, uint32_t *arena, unsigned root_bits,
     if (total == 0) {
         if (kind != 1)
             return PTPNG_E_BAD_HUFFMAN;
-        memset(root, 0, root_size * sizeof(uint32_t));
+        fill_bad(root, root_size);
         return PTPNG_OK; /* dist tree with no codes; error only if used */
     }
 
@@ -135,7 +172,7 @@ static int build_table(uint32_t *root, uint32_t *arena, unsigned root_bits,
             return PTPNG_E_BAD_HUFFMAN; /* CL tree must be complete */
         if (!(total == 1 && max_len == 1))
             return PTPNG_E_BAD_HUFFMAN;
-        memset(root, 0, root_size * sizeof(uint32_t));
+        fill_bad(root, root_size);
     }
 
     {
@@ -165,10 +202,9 @@ static int build_table(uint32_t *root, uint32_t *arena, unsigned root_bits,
                 arena_used += 1u << sub_bits_at[p];
                 if (arena_used > arena_cap)
                     return PTPNG_E_BAD_HUFFMAN;
-                memset(arena + sub_off_at[p], 0,
-                       (size_t)(1u << sub_bits_at[p]) * sizeof(uint32_t));
-                root[p] = F_SUB | ((uint32_t)sub_off_at[p] << 8) |
-                          ((uint32_t)sub_bits_at[p] << 24);
+                fill_bad(arena + sub_off_at[p], 1u << sub_bits_at[p]);
+                root[p] = F_SUB | ((uint32_t)sub_off_at[p] << 16) |
+                          ((uint32_t)sub_bits_at[p] << 8) | root_bits;
             }
         }
     }
@@ -180,25 +216,7 @@ static int build_table(uint32_t *root, uint32_t *arena, unsigned root_bits,
             continue;
         rev = rev_bits(sym_code[i], l);
 
-        if (kind == 1) {
-            if (i < 30)
-                e = ((uint32_t)dist_base_tab[i] << 8) |
-                    ((uint32_t)dist_extra_tab[i] << 24) | l;
-            else
-                e = F_LIT; /* symbols 30/31: invalid (len nibble 0) */
-        } else if (kind == 2) {
-            e = F_LIT | ((uint32_t)i << 8) | l;
-        } else if (i < 256) {
-            e = F_LIT | ((uint32_t)i << 8) | l;
-        } else if (i == 256) {
-            e = F_EOB | l;
-        } else if (i < 286) {
-            unsigned s = i - 257;
-            e = ((uint32_t)len_base_tab[s] << 8) |
-                ((uint32_t)len_extra_tab[s] << 17) | l;
-        } else {
-            e = F_LIT; /* symbols 286/287: invalid (len nibble 0) */
-        }
+        e = make_entry(kind, i, l <= root_bits ? l : l - root_bits);
 
         if (l <= root_bits) {
             unsigned k;
@@ -209,7 +227,6 @@ static int build_table(uint32_t *root, uint32_t *arena, unsigned root_bits,
             unsigned sb = sub_bits_at[pfx];
             unsigned off = sub_off_at[pfx];
             unsigned j, stride = 1u << (l - root_bits);
-            e = (e & ~0xFu) | (l - root_bits); /* remaining bit count */
             for (j = (rev >> root_bits) & (stride - 1); j < (1u << sb);
                  j += stride)
                 arena[off + j] = e;
@@ -283,8 +300,8 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
         if (bitcnt >= 0 && bitcnt < 48) {                               \
             if ((size_t)(in_end - in) >= 8) {                            \
                 bitbuf |= LOAD64LE(in) << bitcnt;                       \
-                in += (64 - bitcnt) >> 3;                               \
-                bitcnt += (64 - bitcnt) & ~7;                           \
+                in += (63 - bitcnt) >> 3;                               \
+                bitcnt |= 56;                                           \
             } else {                                                    \
                 while (bitcnt <= 56 && in < in_end) {                   \
                     bitbuf |= (uint64_t)*in++ << bitcnt;                \
@@ -294,11 +311,26 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
         }                                                               \
     } while (0)
 
+/* Requires 0 <= bitcnt <= 63 and eight readable input bytes. Bits above
+ * bitcnt are zero or already hold the same stream bits, so the OR is
+ * idempotent; afterwards 56 <= bitcnt <= 63. */
+#define REFILL_FAST()                                                   \
+    do {                                                                \
+        bitbuf |= LOAD64LE(in) << bitcnt;                               \
+        in += (63 - bitcnt) >> 3;                                       \
+        bitcnt |= 56;                                                   \
+    } while (0)
+
 #define PEEK32() ((uint32_t)bitbuf)
 #define DROP(n) do { bitbuf >>= (n); bitcnt -= (n); } while (0)
+#define DROP_E(e)                                                       \
+    do { bitbuf >>= (uint8_t)(e); bitcnt -= (int)((e) & 0xFF); } while (0)
+#define EXTRA_BITS(saved, e)                                            \
+    (((uint32_t)(saved) & ((1u << ((e) & 0xFF)) - 1)) >> (((e) >> 8) & 0xF))
+#define COPY16(d, s) memcpy((d), (s), 16)
 
     for (;;) { /* per deflate block */
-        unsigned bfinal, btype, v;
+        unsigned bfinal, btype;
 
         REFILL();
         if (bitcnt < 3)
@@ -379,12 +411,12 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                 if (bitcnt <= 0)
                     return PTPNG_E_TRUNCATED;
                 e = cl_tbl[PEEK32() & (CL_SIZE - 1)];
-                nb = e & 0xF;
-                if (nb == 0)
+                nb = e & 0xFF;
+                if (nb == 0 || (e & F_EXC))
                     return PTPNG_E_INFLATE_CORRUPT;
                 DROP(nb);
                 {
-                    unsigned sym = (e >> 8) & 0xFF;
+                    unsigned sym = (e >> 16) & 0xFF;
                     if (sym < 16) {
                         lens[li++] = (uint8_t)sym;
                         prev = sym;
@@ -424,236 +456,181 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
 
         /* hot symbol decode loop */
         for (;;) {
-            uint32_t e, nb;
+            uint32_t e;
+            uint64_t saved;
+            unsigned len, dist;
 
-            if (bitcnt < 0)
-                return PTPNG_E_TRUNCATED;
-
-            REFILL();
-#if INFLATE_BATCH_BIT_GUARD
-            if (pos + 8 <= out_len && bitcnt >= 4 * LITLEN_ROOT) {
-#else
-            if (pos + 8 <= out_len) {
-#endif
-                /* Up to four root-table literals share one refill. */
-                /* On selected compilers, the batch guard proves all four
-                 * root literals fit. Short input tails use slow_decode. */
-                /* build_table gives valid literals a nonzero bit count, so
-                 * their entries exceed F_LIT. Reserved symbols are exactly
-                 * F_LIT; matches, EOB and subtable entries are below it. */
-                e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
-                nb = e & 0xF;
-                if (e > F_LIT) {
-                    out[pos] = (uint8_t)(e >> 8);
-                    bitbuf >>= nb; bitcnt -= nb;
-                    e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
-                    nb = e & 0xF;
-#if INFLATE_BATCH_BIT_GUARD
-                    if (e > F_LIT) {
-#else
-                    if (e > F_LIT &&
-                        (unsigned)bitcnt >= nb) {
-#endif
-                        out[pos + 1] = (uint8_t)(e >> 8);
-                        bitbuf >>= nb; bitcnt -= nb;
-                        pos += 2;
-                        e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
-                        nb = e & 0xF;
-#if INFLATE_BATCH_BIT_GUARD
-                        if (e > F_LIT) {
-#else
-                        if (e > F_LIT &&
-                            bitcnt >= (int)nb) {
-#endif
-                            out[pos++] = (uint8_t)(e >> 8);
-                            DROP(nb);
-                            e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
-                            nb = e & 0xF;
-#if INFLATE_BATCH_BIT_GUARD
-                            if (e > F_LIT) {
-#else
-                            if (e > F_LIT &&
-                                bitcnt >= (int)nb) {
-#endif
-                                out[pos++] = (uint8_t)(e >> 8);
-                                DROP(nb);
+            /* Fast loop: input and output slack remove per-symbol bounds
+             * checks. Each iteration refills once to >= 56 bits, enough for
+             * a length code with extra bits plus a distance code with extra
+             * bits (20 + 28), or for four root-table literals (40). Matches
+             * may store up to 15 bytes beyond their end; the output margin
+             * keeps those stores inside out, and later symbols overwrite
+             * them. */
+            if ((size_t)(in_end - in) >= FAST_IN_MARGIN &&
+                out_len - pos >= FAST_OUT_MARGIN && bitcnt >= 0) {
+                uint8_t *op = out + pos;
+                uint8_t *const op_limit = out + (out_len - FAST_OUT_MARGIN);
+                const uint8_t *const in_limit = in_end - FAST_IN_MARGIN;
+                do {
+                    REFILL_FAST();
+                    e = lit_tbl[bitbuf & (LITLEN_SIZE - 1)];
+                    if ((int32_t)e < 0) {
+                        DROP_E(e);
+                        *op++ = (uint8_t)(e >> 16);
+                        e = lit_tbl[bitbuf & (LITLEN_SIZE - 1)];
+                        if ((int32_t)e < 0) {
+                            DROP_E(e);
+                            *op++ = (uint8_t)(e >> 16);
+                            e = lit_tbl[bitbuf & (LITLEN_SIZE - 1)];
+                            if ((int32_t)e < 0) {
+                                DROP_E(e);
+                                *op++ = (uint8_t)(e >> 16);
+                                e = lit_tbl[bitbuf & (LITLEN_SIZE - 1)];
+                                if ((int32_t)e < 0) {
+                                    DROP_E(e);
+                                    *op++ = (uint8_t)(e >> 16);
+                                    continue;
+                                }
+                            }
+                        }
+                        /* The peeked entry stays valid: refilling only adds
+                         * bits above the ones it was indexed with. */
+                        REFILL_FAST();
+                    }
+                    if (e & F_EXC) {
+                        if (e & F_SUB) {
+                            DROP_E(e);
+                            e = lit_arena[(e >> 16) + ((uint32_t)bitbuf &
+                                          ((1u << ((e >> 8) & 0xF)) - 1))];
+                            if ((int32_t)e < 0) {
+                                DROP_E(e);
+                                *op++ = (uint8_t)(e >> 16);
                                 continue;
                             }
                         }
-                        /* A following match can need more bits than remain.
-                         * Refill before consuming any nonliteral entry. */
-                        goto slow_decode;
+                        if (e & F_EXC) {
+                            if (e & F_EOB) {
+                                DROP_E(e);
+                                pos = (size_t)(op - out);
+                                goto block_done;
+                            }
+                            return PTPNG_E_INFLATE_CORRUPT;
+                        }
                     }
-                    /* second symbol is not a simple literal; the first
-                     * literal is stored and consumed already.  A simple
-                     * EOB can be consumed directly (its bits are valid);
-                     * anything else re-decodes after a refill. */
-                    pos += 1;
-                    if (e & F_EOB) {
-                        DROP(nb);
-                        break;
+                    saved = bitbuf;
+                    DROP_E(e);
+                    len = (e >> 16) + EXTRA_BITS(saved, e);
+                    e = dist_tbl[bitbuf & (DIST_SIZE - 1)];
+                    if (e & F_EXC) {
+                        if (!(e & F_SUB))
+                            return PTPNG_E_INFLATE_CORRUPT;
+                        DROP_E(e);
+                        e = dist_arena[(e >> 16) + ((uint32_t)bitbuf &
+                                       ((1u << ((e >> 8) & 0xF)) - 1))];
+                        if (e & F_EXC)
+                            return PTPNG_E_INFLATE_CORRUPT;
                     }
-                    goto slow_decode;
-                }
-                /* first symbol is not a simple literal */
-                if (e & F_SUB) {
-                    DROP(LITLEN_ROOT);
-                    e = lit_arena[((e >> 8) & 0xFFFF) +
-                                  (PEEK32() & ((1u << ((e >> 24) & 0xF)) - 1))];
-                }
-                goto have_entry;
+                    saved = bitbuf;
+                    DROP_E(e);
+                    dist = (e >> 16) + EXTRA_BITS(saved, e);
+                    if (dist > (size_t)(op - out))
+                        return PTPNG_E_INFLATE_CORRUPT;
+                    {
+                        uint8_t *dst = op;
+                        const uint8_t *src = op - dist;
+                        uint8_t *const end = op + len;
+                        if (dist >= 16) {
+                            /* Each 16-byte source chunk ends at or before
+                             * its destination, so it is already decoded. */
+                            COPY16(dst, src);
+                            while (dst + 16 < end) {
+                                dst += 16; src += 16;
+                                COPY16(dst, src);
+                            }
+                        } else if (dist >= 8) {
+                            do {
+                                STORE64LE(dst, LOAD64LE(src));
+                                dst += 8; src += 8;
+                            } while (dst < end);
+                        } else if (dist == 1) {
+                            uint64_t v = (uint64_t)src[0] *
+                                         UINT64_C(0x0101010101010101);
+                            do {
+                                STORE64LE(dst, v);
+                                STORE64LE(dst + 8, v);
+                                dst += 16;
+                            } while (dst < end);
+                        } else {
+                            /* The first dist loaded bytes are decoded; each
+                             * step therefore extends the pattern by dist. */
+                            do {
+                                STORE64LE(dst, LOAD64LE(src));
+                                dst += dist; src += dist;
+                            } while (dst < end);
+                        }
+                    }
+                    op += len;
+                } while (op < op_limit && in < in_limit);
+                pos = (size_t)(op - out);
             }
 
-slow_decode:
-            /* generic single-symbol path (near end of output, or the
-             * continuation after a fast-path literal); the peek is
-             * idempotent, so re-decoding after the refill is safe */
+            /* Careful path: one symbol at a time with full checks, used near
+             * the ends of the input and output. */
+            if (bitcnt < 0)
+                return PTPNG_E_TRUNCATED;
             REFILL();
             e = lit_tbl[PEEK32() & (LITLEN_SIZE - 1)];
             if (e & F_SUB) {
-                DROP(LITLEN_ROOT);
-                e = lit_arena[((e >> 8) & 0xFFFF) +
-                              (PEEK32() & ((1u << ((e >> 24) & 0xF)) - 1))];
+                DROP_E(e);
+                e = lit_arena[(e >> 16) +
+                              (PEEK32() & ((1u << ((e >> 8) & 0xF)) - 1))];
             }
-have_entry:
-            nb = e & 0xF;
-            if (nb == 0)
-                return PTPNG_E_INFLATE_CORRUPT;
-            DROP(nb);
-
-            if (e & F_LIT) {
+            if ((int32_t)e < 0) {
+                DROP_E(e);
                 if (pos >= out_len)
                     return PTPNG_E_INFLATE_SIZE;
-                out[pos++] = (uint8_t)(e >> 8);
+                out[pos++] = (uint8_t)(e >> 16);
                 continue;
             }
-            if (e & F_EOB)
-                break;
-
+            if (e & F_EXC) {
+                if (e & F_EOB) {
+                    DROP_E(e);
+                    break;
+                }
+                return PTPNG_E_INFLATE_CORRUPT;
+            }
+            saved = bitbuf;
+            DROP_E(e);
+            len = (e >> 16) + EXTRA_BITS(saved, e);
+            /* No refill needed: the 48-bit refill guarantee leaves at least
+             * 28 bits after a 15-bit length code and 5 extra bits, exactly
+             * a 15-bit distance code plus 13 extra bits. */
+            e = dist_tbl[PEEK32() & (DIST_SIZE - 1)];
+            if (e & F_SUB) {
+                DROP_E(e);
+                e = dist_arena[(e >> 16) +
+                               (PEEK32() & ((1u << ((e >> 8) & 0xF)) - 1))];
+            }
+            if (e & F_EXC)
+                return PTPNG_E_INFLATE_CORRUPT;
+            saved = bitbuf;
+            DROP_E(e);
+            dist = (e >> 16) + EXTRA_BITS(saved, e);
+            if (dist > pos)
+                return PTPNG_E_INFLATE_CORRUPT;
+            if (pos + len > out_len)
+                return PTPNG_E_INFLATE_SIZE;
             {
-                unsigned len = (e >> 8) & 0x1FF;
-                unsigned lextra = (e >> 17) & 0x7;
-                unsigned dist, dextra;
-                uint8_t *dst;
-                size_t rem;
-
-                if (lextra) {
-                    v = PEEK32() & ((1u << lextra) - 1); DROP(lextra);
-                    len += v;
-                }
-
-                /* no refill needed here: after the length code the buffer
-                 * still holds >= 28 bits (48-bit refill guarantee minus
-                 * 15-bit len code and 5 extra), exactly the worst case
-                 * of a 15-bit dist code plus 13 extra bits */
-                e = dist_tbl[PEEK32() & (DIST_SIZE - 1)];
-                if (e & F_SUB) {
-                    DROP(DIST_ROOT);
-                    e = dist_arena[((e >> 8) & 0xFFFF) +
-                                   (PEEK32() & ((1u << ((e >> 24) & 0xF)) - 1))];
-                    nb = e & 0xF;
-                    if (nb == 0)
-                        return PTPNG_E_INFLATE_CORRUPT;
-                    DROP(nb);
-                } else {
-                    nb = e & 0xF;
-                    if (nb == 0)
-                        return PTPNG_E_INFLATE_CORRUPT;
-                    DROP(nb);
-                }
-                dist = (e >> 8) & 0x7FFF;
-                dextra = (e >> 24) & 0xF;
-                if (dextra) {
-                    v = PEEK32() & ((1u << dextra) - 1); DROP(dextra);
-                    dist += v;
-                }
-
-                if (dist > pos)
-                    return PTPNG_E_INFLATE_CORRUPT;
-                if (pos + len > out_len)
-                    return PTPNG_E_INFLATE_SIZE;
-
-                dst = out + pos;
-                rem = len;
-                if (len <= 16 && dist >= 16 && out_len - pos >= 16) {
-                    /* Common photo matches fit in one vector-sized copy.
-                     * The source is decoded history, the ranges do not
-                     * overlap, and any excess store stays inside out. */
-                    memcpy(dst, dst - dist, 16);
-                } else if (dist == 1) {
-                    /* Runs are common in filtered PNG data. Avoid building
-                     * a periodic scratch buffer for a single repeated byte. */
-                    memset(dst, dst[-1], rem);
-                } else if (dist >= 32) {
-                    const uint8_t *src = dst - dist;
-                    if (dist >= 64) {
-                        while (rem >= 64) {
-                            uint64_t a, b, c, d, f, g, h2, i2;
-                            a = LOAD64LE(src);      b = LOAD64LE(src + 8);
-                            c = LOAD64LE(src + 16); d = LOAD64LE(src + 24);
-                            f = LOAD64LE(src + 32); g = LOAD64LE(src + 40);
-                            h2 = LOAD64LE(src + 48); i2 = LOAD64LE(src + 56);
-                            STORE64LE(dst, a);      STORE64LE(dst + 8, b);
-                            STORE64LE(dst + 16, c); STORE64LE(dst + 24, d);
-                            STORE64LE(dst + 32, f); STORE64LE(dst + 40, g);
-                            STORE64LE(dst + 48, h2);STORE64LE(dst + 56, i2);
-                            dst += 64; src += 64; rem -= 64;
-                        }
-                    }
-                    while (rem >= 32) {
-                        uint64_t a, b, c, d;
-                        a = LOAD64LE(src);      b = LOAD64LE(src + 8);
-                        c = LOAD64LE(src + 16); d = LOAD64LE(src + 24);
-                        STORE64LE(dst, a);      STORE64LE(dst + 8, b);
-                        STORE64LE(dst + 16, c); STORE64LE(dst + 24, d);
-                        dst += 32; src += 32; rem -= 32;
-                    }
-                    if (rem) {
-                        if ((size_t)(dst - out) + 32 <= out_len) {
-                            uint64_t a, b, c, d;
-                            const uint8_t *s2 = dst - dist;
-                            a = LOAD64LE(s2);      b = LOAD64LE(s2 + 8);
-                            c = LOAD64LE(s2 + 16); d = LOAD64LE(s2 + 24);
-                            STORE64LE(dst, a);      STORE64LE(dst + 8, b);
-                            STORE64LE(dst + 16, c); STORE64LE(dst + 24, d);
-                        } else {
-                            const uint8_t *s2 = dst - dist;
-                            while (rem--) *dst++ = *s2++;
-                        }
-                    }
-                } else if (rem > 32) {
-                    uint8_t tmp[64];
-                    const uint8_t *src = dst - dist;
-                    unsigned i2, r, m;
-                    for (i2 = 0; i2 < dist; i2++) tmp[i2] = src[i2];
-                    for (; i2 < 64; i2++) tmp[i2] = tmp[i2 - dist];
-                    r = 0; m = 32 % dist;
-                    while (rem >= 32 && (size_t)(dst - out) + 32 <= out_len) {
-                        uint64_t a, b, c, d;
-                        a = LOAD64LE(tmp + r);      b = LOAD64LE(tmp + r + 8);
-                        c = LOAD64LE(tmp + r + 16); d = LOAD64LE(tmp + r + 24);
-                        STORE64LE(dst, a);      STORE64LE(dst + 8, b);
-                        STORE64LE(dst + 16, c); STORE64LE(dst + 24, d);
-                        dst += 32; rem -= 32;
-                        r += m;
-                        if (r >= dist) r -= dist;
-                    }
-                    while (rem--) {
-                        *dst++ = tmp[r];
-                        if (++r == dist) r = 0;
-                    }
-                } else {
-                    const uint8_t *src = dst - dist;
-                    size_t rem2 = len;
-                    while (rem2--) {
-                        *dst = *src;
-                        ++dst; ++src;
-                    }
-                }
-                pos += len;
-                continue;
+                uint8_t *dst = out + pos;
+                const uint8_t *src = dst - dist;
+                unsigned k;
+                for (k = 0; k < len; k++)
+                    dst[k] = src[k];
             }
+            pos += len;
         } /* symbol loop */
+block_done:
 
         if (bfinal)
             break;
@@ -662,6 +639,10 @@ have_entry:
 #undef REFILL
 #undef PEEK32
 #undef DROP
+#undef DROP_E
+#undef EXTRA_BITS
+#undef COPY16
+#undef REFILL_FAST
 
     /* byte-align and locate the adler32: pushing back floor(bitcnt/8)
      * whole bytes lands exactly on the byte after the final code's
