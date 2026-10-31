@@ -55,6 +55,12 @@
 #define F_EXC       (F_BAD | F_EOB | F_SUB)
 #define FAST_IN_MARGIN  32
 #define FAST_OUT_MARGIN 320
+/* Sink notifications: every SINK_STEP output bytes, for the bytes at least
+ * one deflate window behind the current position. */
+#define SINK_WINDOW 32768
+#define SINK_STEP   65536
+
+#define SINK_NOTIFY()                                                       do {                                                                        if (pos >= next_sink) {                                                     sink->progress(sink, pos - SINK_WINDOW, 0);                             next_sink = pos + SINK_STEP;                                        }                                                                   } while (0)
 
 static const uint16_t len_base_tab[29] = {
     3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,
@@ -266,7 +272,7 @@ static int build_fixed(void)
 
 static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
                         size_t out_len, uint32_t flags, int exact_size,
-                        size_t *produced)
+                        size_t *produced, struct ptpng_inflate_sink *sink)
 {
     const uint8_t *in_end = in + in_len;
     uint64_t bitbuf = 0;
@@ -278,6 +284,8 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
     static uint32_t dynamic_dist[DIST_SIZE], dist_arena[DIST_ARENA];
     const uint32_t *lit_tbl = dynamic_lit, *dist_tbl = dynamic_dist;
     static uint32_t cl_tbl[CL_SIZE];
+    /* output position of the next sink notification */
+    size_t next_sink = sink ? (size_t)SINK_WINDOW + SINK_STEP : SIZE_MAX;
 
     *produced = 0;
     if (in_len < 6)
@@ -332,6 +340,7 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
     for (;;) { /* per deflate block */
         unsigned bfinal, btype;
 
+        SINK_NOTIFY();
         REFILL();
         if (bitcnt < 3)
             return PTPNG_E_TRUNCATED;
@@ -460,6 +469,8 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
             uint64_t saved;
             unsigned len, dist;
 
+            SINK_NOTIFY();
+
             /* Fast loop: input and output slack remove per-symbol bounds
              * checks. Each iteration refills once to >= 56 bits, enough for
              * a length code with extra bits plus a distance code with extra
@@ -470,7 +481,9 @@ static int inflate_impl(const uint8_t *in, size_t in_len, uint8_t *out,
             if ((size_t)(in_end - in) >= FAST_IN_MARGIN &&
                 out_len - pos >= FAST_OUT_MARGIN && bitcnt >= 0) {
                 uint8_t *op = out + pos;
-                uint8_t *const op_limit = out + (out_len - FAST_OUT_MARGIN);
+                uint8_t *const op_limit = out +
+                    (out_len - FAST_OUT_MARGIN < next_sink
+                         ? out_len - FAST_OUT_MARGIN : next_sink);
                 const uint8_t *const in_limit = in_end - FAST_IN_MARGIN;
                 do {
                     REFILL_FAST();
@@ -651,6 +664,7 @@ block_done:
 #undef EXTRA_BITS
 #undef COPY16
 #undef REFILL_FAST
+#undef SINK_NOTIFY
 
     /* byte-align and locate the adler32: pushing back floor(bitcnt/8)
      * whole bytes lands exactly on the byte after the final code's
@@ -664,11 +678,13 @@ block_done:
         return PTPNG_E_TRUNCATED;
     if (exact_size && pos != out_len)
         return PTPNG_E_INFLATE_SIZE;
+    if (sink)
+        sink->progress(sink, pos, 1);
 
     if (!(flags & PTPNG_INF_NO_ADLER)) {
         uint32_t want = ((uint32_t)in[0] << 24) | ((uint32_t)in[1] << 16) |
                         ((uint32_t)in[2] << 8) | (uint32_t)in[3];
-        uint32_t got = ptpng_adler32(out, pos);
+        uint32_t got = sink ? sink->adler : ptpng_adler32(out, pos);
         if (want != got)
             return PTPNG_E_BAD_ADLER;
     }
@@ -692,9 +708,28 @@ int INFLATE_PUBLIC(const uint8_t *in, size_t in_len, uint8_t *out,
     size_t produced;
     if (!in || !out || out_len == 0)
         return PTPNG_E_BAD_ARG;
-    return inflate_impl(in, in_len, out, out_len, flags, 1, &produced);
+    return inflate_impl(in, in_len, out, out_len, flags, 1, &produced, NULL);
 }
 #undef INFLATE_PUBLIC
+
+int ptpng_inflate_sink(const uint8_t *in, size_t in_len, uint8_t *out,
+                       size_t out_len, uint32_t flags,
+                       struct ptpng_inflate_sink *sink)
+{
+    size_t produced;
+    if (!in || !out || out_len == 0 || !sink)
+        return PTPNG_E_BAD_ARG;
+    return inflate_impl(in, in_len, out, out_len, flags, 1, &produced, sink);
+}
+
+#if !INFLATE_FIXED_STREAM
+int ptpng_inflate_prefers_fixed(const uint8_t *in, size_t in_len,
+                                size_t out_len)
+{
+    (void)in; (void)in_len; (void)out_len;
+    return 0;
+}
+#endif
 
 int ptpng_inflate_dyn(const uint8_t *in, size_t in_len, size_t max_out,
                       uint8_t **out, size_t *out_len)
@@ -712,7 +747,7 @@ int ptpng_inflate_dyn(const uint8_t *in, size_t in_len, size_t max_out,
         buf = (uint8_t *)malloc(cap + 1);
         if (!buf) return PTPNG_E_OUT_OF_MEMORY;
         rc = inflate_impl(in, in_len, buf, cap, 0, 0,
-                          &produced);
+                          &produced, NULL);
         if (rc == PTPNG_OK)
             break;
         free(buf);

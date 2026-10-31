@@ -132,6 +132,23 @@ uint32_t ptpng_adler32(const uint8_t *p, size_t n)
     return ptpng_cpu.adler32(p, n);
 }
 
+/* Adler-32 of A followed by B from adler(A), adler(B) and B's length
+ * (zlib's adler32_combine). */
+uint32_t ptpng_adler32_combine(uint32_t a1, uint32_t a2, size_t len2)
+{
+    const uint64_t base = 65521;
+    uint64_t rem = len2 % base;
+    uint64_t sum1 = a1 & 0xffff;
+    uint64_t sum2 = (rem * sum1) % base;
+    sum1 += (a2 & 0xffff) + base - 1;
+    sum2 += ((a1 >> 16) & 0xffff) + ((a2 >> 16) & 0xffff) + base - rem;
+    if (sum1 >= base) sum1 -= base;
+    if (sum1 >= base) sum1 -= base;
+    if (sum2 >= base << 1) sum2 -= base << 1;
+    if (sum2 >= base) sum2 -= base;
+    return (uint32_t)(sum1 | (sum2 << 16));
+}
+
 const char *ptpng_version(void)
 {
     return "ptpng 1.1"
@@ -624,6 +641,76 @@ static int paeth_row_is_zero(const uint8_t *p, size_t n)
     return 1;
 }
 
+/* Reconstruct non-interlaced rows y0..y1-1, compacting them in place
+ * (filter bytes dropped). Rows before y0 are already reconstructed. */
+static int unfilter_rows(uint8_t *raw, size_t rb, unsigned bpp, uint32_t y0,
+                         uint32_t y1, const uint8_t *zeros)
+{
+    ptpng_filter_fn fsub = ptpng_cpu.filter_sub;
+    ptpng_filter_fn fup = ptpng_cpu.filter_up;
+    ptpng_filter_fn fpaeth = ptpng_cpu.filter_paeth;
+    uint32_t y;
+    for (y = y0; y < y1; y++) {
+        uint8_t *frow = raw + (size_t)y * (rb + 1);
+        unsigned f = frow[0];
+        uint8_t *dst = raw + (size_t)y * rb; /* compacted position */
+        const uint8_t *src = frow + 1;
+        const uint8_t *prev = y ? raw + (size_t)(y - 1) * rb : zeros;
+        if (f > 4)
+            return PTPNG_E_INFLATE_CORRUPT;
+        switch (f) {
+        case 0: memmove(dst, src, rb); break;
+        case 1: fsub(dst, src, prev, rb, bpp); break;
+        case 2: fup(dst, src, prev, rb, bpp); break;
+        case 3: ptpng_filter_avg_scalar(dst, src, prev, rb, bpp); break;
+        case 4:
+            /* dst trails src, but the scan finishes before any store */
+            if (paeth_row_is_zero(src, rb))
+                memcpy(dst, prev, rb);
+            else
+                fpaeth(dst, src, prev, rb, bpp);
+            break;
+        }
+    }
+    return PTPNG_OK;
+}
+
+/* Streams rows through checksum and reconstruction while inflation
+ * continues. A row is consumed only once inflation has moved 32 KiB past
+ * its end, so no later match can read its rewritten bytes; while it is
+ * still cached, the Adler sum covers its filtered bytes before compaction
+ * overwrites them. A filter error is kept until inflation finishes, which
+ * preserves the precedence of inflate errors such as a bad checksum. */
+struct row_sink {
+    struct ptpng_inflate_sink base;
+    uint8_t *raw;
+    const uint8_t *zeros;
+    size_t rb, adler_pos;
+    uint32_t h, y;
+    unsigned bpp;
+    int check_adler, err;
+};
+
+static void row_sink_progress(struct ptpng_inflate_sink *sink, size_t stable,
+                              int final)
+{
+    struct row_sink *r = (struct row_sink *)sink;
+    size_t stride = r->rb + 1;
+    uint32_t upto = final ? r->h : (uint32_t)(stable / stride);
+    size_t end = final ? stable : (size_t)upto * stride;
+    if (upto > r->h) upto = r->h;
+    if (r->check_adler && end > r->adler_pos) {
+        size_t n = end - r->adler_pos;
+        r->base.adler = ptpng_adler32_combine(
+            r->base.adler, ptpng_adler32(r->raw + r->adler_pos, n), n);
+        r->adler_pos = end;
+    }
+    if (!r->err && upto > r->y) {
+        r->err = unfilter_rows(r->raw, r->rb, r->bpp, r->y, upto, r->zeros);
+        r->y = upto;
+    }
+}
+
 /* Reconstruct scanlines in the raw (filtered) buffer.
  * non-interlaced: rows are compacted in place (filter bytes dropped).
  * interlaced: rows are reconstructed in place, filter bytes kept. */
@@ -639,32 +726,7 @@ static int unfilter_image(uint8_t *raw, uint32_t w, uint32_t h,
 
     if (!interlaced) {
         size_t rb = (size_t)((((uint64_t)w * bitpp) + 7) >> 3);
-        uint32_t y;
-        const uint8_t *prev = zeros;
-        for (y = 0; y < h; y++) {
-            uint8_t *frow = raw + (size_t)y * (rb + 1);
-            unsigned f = frow[0];
-            uint8_t *dst = raw + (size_t)y * rb; /* compacted position */
-            const uint8_t *src = frow + 1;
-            if (f > 4)
-                return PTPNG_E_INFLATE_CORRUPT;
-            if (y)
-                prev = raw + (size_t)(y - 1) * rb;
-            switch (f) {
-            case 0: memmove(dst, src, rb); break;
-            case 1: fsub(dst, src, prev, rb, bpp); break;
-            case 2: fup(dst, src, prev, rb, bpp); break;
-            case 3: ptpng_filter_avg_scalar(dst, src, prev, rb, bpp); break;
-            case 4:
-                /* dst trails src, but the scan finishes before any store */
-                if (paeth_row_is_zero(src, rb))
-                    memcpy(dst, prev, rb);
-                else
-                    fpaeth(dst, src, prev, rb, bpp);
-                break;
-            }
-        }
-        return PTPNG_OK;
+        return unfilter_rows(raw, rb, bpp, 0, h, zeros);
     } else {
         unsigned p;
         size_t off = 0;
@@ -1400,24 +1462,49 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
         const uint8_t *zin = idat_buf ? idat_buf : idat_first;
         uint32_t ifl = (opts->flags & PTPNG_FLAG_NO_VERIFY_ADLER)
                            ? PTPNG_INF_NO_ADLER : 0;
-        rc = ptpng_inflate(zin ? zin : (const uint8_t *)"", idat_total, raw,
-                           (size_t)raw_size, ifl);
-        free(idat_buf);
-        if (rc) {
-            free(raw); free(zeros);
-            ptpng_info_free(&linfo);
-            return rc;
-        }
+        if (!zin)
+            zin = (const uint8_t *)"";
+        if (!interlace && !getenv("PTPNG_DUMP_RAW") &&
+            !ptpng_inflate_prefers_fixed(zin, idat_total, (size_t)raw_size)) {
+            struct row_sink sink;
+            memset(&sink, 0, sizeof(sink));
+            sink.base.progress = row_sink_progress;
+            sink.base.adler = 1;
+            sink.raw = raw;
+            sink.zeros = zeros;
+            sink.rb = (size_t)rb;
+            sink.h = h;
+            sink.bpp = (channels_of(ct) * depth + 7) >> 3;
+            sink.check_adler = !(ifl & PTPNG_INF_NO_ADLER);
+            rc = ptpng_inflate_sink(zin, idat_total, raw, (size_t)raw_size,
+                                    ifl, &sink.base);
+            free(idat_buf);
+            if (rc) {
+                free(raw); free(zeros);
+                ptpng_info_free(&linfo);
+                return rc;
+            }
+            rc = sink.err;
+            if (prof) P3 = pt_tsc();
+        } else {
+            rc = ptpng_inflate(zin, idat_total, raw, (size_t)raw_size, ifl);
+            free(idat_buf);
+            if (rc) {
+                free(raw); free(zeros);
+                ptpng_info_free(&linfo);
+                return rc;
+            }
 #if defined(__linux__)
 inflated:
 #endif
-        if (getenv("PTPNG_DUMP_RAW")) {
-            FILE *df = fopen(getenv("PTPNG_DUMP_RAW"), "wb");
-            if (df) { fwrite(raw, 1, (size_t)raw_size, df); fclose(df); }
+            if (getenv("PTPNG_DUMP_RAW")) {
+                FILE *df = fopen(getenv("PTPNG_DUMP_RAW"), "wb");
+                if (df) { fwrite(raw, 1, (size_t)raw_size, df); fclose(df); }
+            }
+            rc = unfilter_image(raw, w, h, depth, channels_of(ct),
+                                (int)interlace, zeros);
+            if (prof) P3 = pt_tsc();
         }
-        rc = unfilter_image(raw, w, h, depth, channels_of(ct), (int)interlace,
-                            zeros);
-        if (prof) P3 = pt_tsc();
     }
     free(zeros);
     if (rc) {

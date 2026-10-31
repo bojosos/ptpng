@@ -184,9 +184,15 @@ int ptpng_inflate(const uint8_t *in, size_t in_len, uint8_t *out,
     /* Incompressible fixed streams can amortize this separate decoder.
      * Any unsupported or malformed stream retains the original result. */
     if (!in || !out || !out_len) return PTPNG_E_BAD_ARG;
-    if (in_len >= 6 && in_len >= out_len && (in[2] & 6) == 2 &&
+    if (ptpng_inflate_prefers_fixed(in, in_len, out_len) &&
         inflate_fixed_stream(in, in_len, out, out_len, flags)) return PTPNG_OK;
     return ptpng_inflate_fallback(in, in_len, out, out_len, flags);
+}
+
+int ptpng_inflate_prefers_fixed(const uint8_t *in, size_t in_len,
+                                size_t out_len)
+{
+    return in_len >= 6 && in_len >= out_len && (in[2] & 6) == 2;
 }
 
 #if defined(_MSC_VER)

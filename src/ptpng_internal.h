@@ -47,6 +47,7 @@
 /* ---- checksums ------------------------------------------------------- */
 uint32_t ptpng_crc32(const uint8_t *p, size_t n);   /* dispatching */
 uint32_t ptpng_adler32(const uint8_t *p, size_t n); /* dispatching */
+uint32_t ptpng_adler32_combine(uint32_t a1, uint32_t a2, size_t len2);
 uint32_t ptpng_crc32_slice8(const uint8_t *p, size_t n);
 void ptpng_crc_x86_init(void);
 void ptpng_crc_arm_init(void);
@@ -62,6 +63,23 @@ int ptpng_inflate(const uint8_t *in, size_t in_len, uint8_t *out,
                   size_t out_len, uint32_t flags);
 int ptpng_inflate_dyn(const uint8_t *in, size_t in_len, size_t max_out,
                       uint8_t **out, size_t *out_len);
+
+/* Consumer of output while inflation proceeds. progress() first receives
+ * the length of the leading output that no later match can reference, then
+ * a final call (final = 1) with the complete exact-size output once every
+ * symbol has decoded. It may rewrite those bytes, and unless the flags
+ * disable the checksum, it must leave their Adler-32 in adler. */
+struct ptpng_inflate_sink {
+    void (*progress)(struct ptpng_inflate_sink *sink, size_t stable,
+                     int final);
+    uint32_t adler;
+};
+int ptpng_inflate_sink(const uint8_t *in, size_t in_len, uint8_t *out,
+                       size_t out_len, uint32_t flags,
+                       struct ptpng_inflate_sink *sink);
+/* Nonzero when ptpng_inflate would use its separate fixed-stream decoder. */
+int ptpng_inflate_prefers_fixed(const uint8_t *in, size_t in_len,
+                                size_t out_len);
 
 struct ptpng_inflate_chunk { const uint8_t *p; size_t len; };
 #if defined(__linux__)
