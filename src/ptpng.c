@@ -600,6 +600,30 @@ static void extract_pass_row_subbyte(uint8_t *dst_row, const uint8_t *src_row,
 
 /* ================= unfiltering ================= */
 
+/* An all-zero Paeth residual row reproduces the previous row: the first
+ * pixel predicts from above, and afterwards decoded-left equals upper-left,
+ * so every prediction selects above. Reject ordinary rows after one word. */
+static int paeth_row_is_zero(const uint8_t *p, size_t n)
+{
+    size_t i = 0;
+    uint64_t a, b, c, d;
+    if (n >= 8) {
+        memcpy(&a, p, 8);
+        if (a) return 0;
+        i = 8;
+    }
+    for (; n - i >= 32; i += 32) {
+        memcpy(&a, p + i, 8);
+        memcpy(&b, p + i + 8, 8);
+        memcpy(&c, p + i + 16, 8);
+        memcpy(&d, p + i + 24, 8);
+        if (a | b | c | d) return 0;
+    }
+    for (; i < n; i++)
+        if (p[i]) return 0;
+    return 1;
+}
+
 /* Reconstruct scanlines in the raw (filtered) buffer.
  * non-interlaced: rows are compacted in place (filter bytes dropped).
  * interlaced: rows are reconstructed in place, filter bytes kept. */
@@ -631,7 +655,13 @@ static int unfilter_image(uint8_t *raw, uint32_t w, uint32_t h,
             case 1: fsub(dst, src, prev, rb, bpp); break;
             case 2: fup(dst, src, prev, rb, bpp); break;
             case 3: ptpng_filter_avg_scalar(dst, src, prev, rb, bpp); break;
-            case 4: fpaeth(dst, src, prev, rb, bpp); break;
+            case 4:
+                /* dst trails src, but the scan finishes before any store */
+                if (paeth_row_is_zero(src, rb))
+                    memcpy(dst, prev, rb);
+                else
+                    fpaeth(dst, src, prev, rb, bpp);
+                break;
             }
         }
         return PTPNG_OK;
@@ -662,7 +692,12 @@ static int unfilter_image(uint8_t *raw, uint32_t w, uint32_t h,
                 case 1: fsub(row, row, prev, rbp, bpp); break;
                 case 2: fup(row, row, prev, rbp, bpp); break;
                 case 3: ptpng_filter_avg_scalar(row, row, prev, rbp, bpp); break;
-                case 4: fpaeth(row, row, prev, rbp, bpp); break;
+                case 4:
+                    if (paeth_row_is_zero(row, rbp))
+                        memcpy(row, prev, rbp);
+                    else
+                        fpaeth(row, row, prev, rbp, bpp);
+                    break;
                 }
                 prev = row;
             }
