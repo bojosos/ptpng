@@ -3,16 +3,26 @@
 
 uint64_t ptpng_encode_score_avx2(const uint8_t *src, size_t count)
 {
-    __m256i sum = _mm256_setzero_si256();
+    __m256i sum0 = _mm256_setzero_si256(), sum1 = _mm256_setzero_si256();
     const __m256i zero = _mm256_setzero_si256();
     uint64_t lanes[4], score;
     size_t i = 0;
+    for (; count - i >= 128; i += 128) {
+        __m256i b0 = _mm256_loadu_si256((const __m256i *)(src + i));
+        __m256i b1 = _mm256_loadu_si256((const __m256i *)(src + i + 32));
+        __m256i b2 = _mm256_loadu_si256((const __m256i *)(src + i + 64));
+        __m256i b3 = _mm256_loadu_si256((const __m256i *)(src + i + 96));
+        /* abs(-128) has byte value 128, which SAD treats as unsigned. */
+        sum0 = _mm256_add_epi64(sum0, _mm256_sad_epu8(_mm256_abs_epi8(b0), zero));
+        sum1 = _mm256_add_epi64(sum1, _mm256_sad_epu8(_mm256_abs_epi8(b1), zero));
+        sum0 = _mm256_add_epi64(sum0, _mm256_sad_epu8(_mm256_abs_epi8(b2), zero));
+        sum1 = _mm256_add_epi64(sum1, _mm256_sad_epu8(_mm256_abs_epi8(b3), zero));
+    }
     for (; count - i >= 32; i += 32) {
         __m256i bytes = _mm256_loadu_si256((const __m256i *)(src + i));
-        /* abs(-128) has byte value 128, which SAD treats as unsigned. */
-        sum = _mm256_add_epi64(sum, _mm256_sad_epu8(_mm256_abs_epi8(bytes), zero));
+        sum0 = _mm256_add_epi64(sum0, _mm256_sad_epu8(_mm256_abs_epi8(bytes), zero));
     }
-    _mm256_storeu_si256((__m256i *)lanes, sum);
+    _mm256_storeu_si256((__m256i *)lanes, _mm256_add_epi64(sum0, sum1));
     score = lanes[0] + lanes[1] + lanes[2] + lanes[3];
     for (; i < count; ++i) {
         unsigned x = src[i];

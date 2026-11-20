@@ -5,16 +5,37 @@
 
 uint64_t ptpng_encode_score_neon(const uint8_t *src, size_t count)
 {
-    uint64x2_t sum = vdupq_n_u64(0);
-    uint64_t score;
+    uint64_t score = 0;
     size_t i = 0;
-    for (; count - i >= 16; i += 16) {
-        uint8x16_t magnitude = vreinterpretq_u8_s8(vabsq_s8(
-            vreinterpretq_s8_u8(vld1q_u8(src + i))));
-        /* Widen all the way to 64 bits: very wide rows can overflow 32 bits. */
-        sum = vaddq_u64(sum, vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(magnitude))));
+    /* Accumulate 64 bytes per step in 16-bit lanes via vpadalq_u8. At most
+     * 128 vectors per accumulator (4096 bytes) keeps each lane <= 32768. */
+    while (count - i >= 64) {
+        size_t chunk = count - i;
+        size_t end;
+        uint16x8_t a0 = vdupq_n_u16(0), a1 = vdupq_n_u16(0);
+        if (chunk > 4096) chunk = 4096;
+        end = i + (chunk & ~(size_t)63);
+        for (; i < end; i += 64) {
+            uint8x16_t m0 = vreinterpretq_u8_s8(vabsq_s8(
+                vreinterpretq_s8_u8(vld1q_u8(src + i))));
+            uint8x16_t m1 = vreinterpretq_u8_s8(vabsq_s8(
+                vreinterpretq_s8_u8(vld1q_u8(src + i + 16))));
+            uint8x16_t m2 = vreinterpretq_u8_s8(vabsq_s8(
+                vreinterpretq_s8_u8(vld1q_u8(src + i + 32))));
+            uint8x16_t m3 = vreinterpretq_u8_s8(vabsq_s8(
+                vreinterpretq_s8_u8(vld1q_u8(src + i + 48))));
+            a0 = vpadalq_u8(a0, m0);
+            a1 = vpadalq_u8(a1, m1);
+            a0 = vpadalq_u8(a0, m2);
+            a1 = vpadalq_u8(a1, m3);
+        }
+        score += vaddvq_u32(vaddq_u32(vpaddlq_u16(a0), vpaddlq_u16(a1)));
     }
-    score = vgetq_lane_u64(sum, 0) + vgetq_lane_u64(sum, 1);
+    for (; count - i >= 16; i += 16) {
+        uint8x16_t mag = vreinterpretq_u8_s8(vabsq_s8(
+            vreinterpretq_s8_u8(vld1q_u8(src + i))));
+        score += vaddvq_u16(vpaddlq_u8(mag));
+    }
     for (; i < count; ++i) {
         unsigned x = src[i];
         score += x < 128 ? x : 256-x;
@@ -79,6 +100,12 @@ void ptpng_encode_filter_neon(uint8_t *dst, const uint8_t *src,
     }
     switch (filter) {
     case 1:
+        for (; count - i >= 64; i += 64) {
+            vst1q_u8(dst + i,      vsubq_u8(vld1q_u8(src + i),      vld1q_u8(src + i - bpp)));
+            vst1q_u8(dst + i + 16, vsubq_u8(vld1q_u8(src + i + 16), vld1q_u8(src + i + 16 - bpp)));
+            vst1q_u8(dst + i + 32, vsubq_u8(vld1q_u8(src + i + 32), vld1q_u8(src + i + 32 - bpp)));
+            vst1q_u8(dst + i + 48, vsubq_u8(vld1q_u8(src + i + 48), vld1q_u8(src + i + 48 - bpp)));
+        }
         for (; count - i >= 16; i += 16) {
             uint8x16_t s = vld1q_u8(src + i);
             uint8x16_t a = vld1q_u8(src + i - bpp);
@@ -86,6 +113,12 @@ void ptpng_encode_filter_neon(uint8_t *dst, const uint8_t *src,
         }
         break;
     case 2:
+        for (; count - i >= 64; i += 64) {
+            vst1q_u8(dst + i,      vsubq_u8(vld1q_u8(src + i),      vld1q_u8(prev + i)));
+            vst1q_u8(dst + i + 16, vsubq_u8(vld1q_u8(src + i + 16), vld1q_u8(prev + i + 16)));
+            vst1q_u8(dst + i + 32, vsubq_u8(vld1q_u8(src + i + 32), vld1q_u8(prev + i + 32)));
+            vst1q_u8(dst + i + 48, vsubq_u8(vld1q_u8(src + i + 48), vld1q_u8(prev + i + 48)));
+        }
         for (; count - i >= 16; i += 16) {
             uint8x16_t s = vld1q_u8(src + i);
             uint8x16_t b = vld1q_u8(prev + i);
@@ -93,6 +126,14 @@ void ptpng_encode_filter_neon(uint8_t *dst, const uint8_t *src,
         }
         break;
     case 3:
+        if (prev) {
+            for (; count - i >= 32; i += 32) {
+                vst1q_u8(dst + i, vsubq_u8(vld1q_u8(src + i),
+                    vhaddq_u8(vld1q_u8(src + i - bpp), vld1q_u8(prev + i))));
+                vst1q_u8(dst + i + 16, vsubq_u8(vld1q_u8(src + i + 16),
+                    vhaddq_u8(vld1q_u8(src + i + 16 - bpp), vld1q_u8(prev + i + 16))));
+            }
+        }
         for (; count - i >= 16; i += 16) {
             uint8x16_t s = vld1q_u8(src + i);
             uint8x16_t a = vld1q_u8(src + i - bpp);

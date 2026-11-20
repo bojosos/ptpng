@@ -120,35 +120,18 @@ PTPNG_API_INLINE unsigned deflate_log2(unsigned value)
 #ifndef DEFLATE_CHAIN
 #define DEFLATE_CHAIN 64
 #endif
-#ifndef DEFLATE_SHORT_CHAIN
-/* Retain MSVC x64's measured baseline after paired decoder/graphics losses. */
-#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64)
-#define DEFLATE_SHORT_CHAIN 2
-#else
-#define DEFLATE_SHORT_CHAIN 1
-#endif
-#endif
-
-/* Apple keeps the existing ring after inconclusive paired measurements. */
-#if DEFLATE_SHORT_CHAIN == 1 && !defined(__APPLE__)
-#define DEFLATE_SINGLE_SHORT_LINK 1
-#else
-#define DEFLATE_SINGLE_SHORT_LINK 0
-#endif
 
 typedef struct { uint16_t value, distance; } deflate_token;
 typedef struct {
+    /* head[h] packs [31..25]=7-bit hash tag, [24]=has_more chain bit,
+     * [23..0]=(pos+1) & 0xFFFFFF. previous[] stores 16-bit distance deltas
+     * (1..32768, 0=end), halving chain memory to 64 KiB with zero sliding. */
     uint32_t head[1u << DEFLATE_HASH_BITS];
-    uint32_t previous[DEFLATE_WINDOW];
-    /* The long chain hashes six bytes. A separate, shallow three-byte
-     * chain recovers profitable short matches in noisier image residuals. */
+    uint16_t previous[DEFLATE_WINDOW];
+    /* Three-byte shallow hash: [31..24]=8-bit hash tag, [23..0]=pos+1.
+     * Rejects ~99.8% of collisions inline without touching src[ref]. */
     uint32_t short_head[1u << DEFLATE_HASH_BITS];
-#if DEFLATE_SINGLE_SHORT_LINK
-    /* A single-candidate search reads only the latest insertion's link. */
-    uint32_t short_link;
-#else
-    uint32_t short_previous[DEFLATE_WINDOW];
-#endif
+    uint16_t short_dist;
     deflate_token tokens[DEFLATE_TOKENS];
 } deflate_state;
 typedef struct { uint8_t symbol, extra, extra_bits; } deflate_run;
@@ -182,77 +165,93 @@ PTPNG_API_INLINE unsigned deflate_reverse(unsigned value, unsigned count)
             deflate_reverse8(value >> 8)) >> (16 - count);
 }
 
-PTPNG_API_INLINE unsigned deflate_hash6(const uint8_t *p)
-{
-    uint32_t low;
-    uint16_t high;
-    uint64_t value;
-    memcpy(&low, p, sizeof(low));
-    memcpy(&high, p + 4, sizeof(high));
-    value = low | ((uint64_t)high << 32);
-    return (unsigned)((value * UINT64_C(0x9e3779b97f4a7c15)) >>
-                      (64 - DEFLATE_HASH_BITS));
-}
-
-#if DEFLATE_SINGLE_SHORT_LINK
-PTPNG_API_INLINE uint32_t deflate_insert_impl(deflate_state *state,
+PTPNG_API_INLINE unsigned deflate_insert_impl(deflate_state *state,
                                               const uint8_t *src, size_t pos,
-                                              size_t size, unsigned save_short_link)
-#else
-PTPNG_API_INLINE uint32_t deflate_insert(deflate_state *state,
-                                         const uint8_t *src, size_t pos,
-                                         size_t size)
-#endif
+                                              size_t size, unsigned save_short)
 {
+    uint32_t cur_pos = (uint32_t)(pos + 1) & UINT32_C(0x00ffffff);
+    uint64_t hprod;
     unsigned hash;
-    uint32_t old;
+    uint32_t tag7, old, old_pos, delta;
+    unsigned valid;
 #if PTPNG_DEFLATE_WORD_STORE
     if (size - pos >= 8) {
         uint64_t word;
-        uint32_t short_value;
+        uint32_t short_value, short_prod, short_tag, old_short;
         unsigned short_hash;
-        /* On known little-endian targets, one in-bounds load supplies both
-         * hashes. Mask before multiplying: bytes six and seven must not
-         * affect the existing six-byte hash or its candidate ordering. */
+        /* One in-bounds 8-byte load supplies both hashes and inline tags. */
         memcpy(&word, src + pos, sizeof(word));
         short_value = (uint32_t)word & UINT32_C(0x00ffffff);
-        short_hash = (short_value * UINT32_C(2654435761)) >>
-                     (32 - DEFLATE_HASH_BITS);
+        short_prod = short_value * UINT32_C(2654435761);
+        short_hash = short_prod >> (32 - DEFLATE_HASH_BITS);
+        short_tag = (short_prod << 16) & UINT32_C(0xff000000);
+        old_short = state->short_head[short_hash];
+        state->short_head[short_hash] = short_tag | cur_pos;
+        if (save_short) {
+            uint32_t s_pos = old_short & UINT32_C(0x00ffffff);
+            uint32_t s_dist = (cur_pos - s_pos) & UINT32_C(0x00ffffff);
+            state->short_dist =
+                ((old_short & UINT32_C(0xff000000)) == short_tag &&
+                 s_pos && s_dist && s_dist <= DEFLATE_WINDOW && s_dist <= pos)
+                ? (uint16_t)s_dist : 0;
+        }
         word &= UINT64_C(0x0000ffffffffffff);
-        hash = (unsigned)((word * UINT64_C(0x9e3779b97f4a7c15)) >>
-                          (64 - DEFLATE_HASH_BITS));
-#if DEFLATE_SINGLE_SHORT_LINK
-        if (save_short_link) state->short_link = state->short_head[short_hash];
-#else
-        state->short_previous[pos & (DEFLATE_WINDOW - 1)] = state->short_head[short_hash];
-#endif
-        state->short_head[short_hash] = (uint32_t)pos + 1;
+        hprod = word * UINT64_C(0x9e3779b97f4a7c15);
+        hash = (unsigned)(hprod >> (64 - DEFLATE_HASH_BITS));
+        tag7 = (uint32_t)(hprod >> 16) & UINT32_C(0xfe000000);
         old = state->head[hash];
-        state->previous[pos & (DEFLATE_WINDOW - 1)] = old;
-        state->head[hash] = (uint32_t)pos + 1;
-        return old;
+        old_pos = old & UINT32_C(0x00ffffff);
+        delta = (cur_pos - old_pos) & UINT32_C(0x00ffffff);
+        valid = old_pos && delta && delta <= DEFLATE_WINDOW && delta <= pos;
+        state->previous[pos & (DEFLATE_WINDOW - 1)] = valid ? (uint16_t)delta : 0;
+        state->head[hash] = tag7 | (valid ? UINT32_C(0x01000000) : 0u) | cur_pos;
+        if (!valid) return 0;
+        if (!(old & UINT32_C(0x01000000)) && (old & UINT32_C(0xfe000000)) != tag7)
+            return 0;
+        return delta;
     }
 #endif
     if (size - pos >= 3) {
-        uint32_t value = src[pos] | ((uint32_t)src[pos + 1] << 8) |
-                         ((uint32_t)src[pos + 2] << 16);
-        unsigned short_hash = (value * UINT32_C(2654435761)) >>
-                              (32 - DEFLATE_HASH_BITS);
-#if DEFLATE_SINGLE_SHORT_LINK
-        if (save_short_link) state->short_link = state->short_head[short_hash];
-#else
-        state->short_previous[pos & (DEFLATE_WINDOW - 1)] = state->short_head[short_hash];
-#endif
-        state->short_head[short_hash] = (uint32_t)pos + 1;
+        uint32_t short_value = src[pos] | ((uint32_t)src[pos + 1] << 8) |
+                               ((uint32_t)src[pos + 2] << 16);
+        uint32_t short_prod = short_value * UINT32_C(2654435761);
+        unsigned short_hash = short_prod >> (32 - DEFLATE_HASH_BITS);
+        uint32_t short_tag = (short_prod << 16) & UINT32_C(0xff000000);
+        uint32_t old_short = state->short_head[short_hash];
+        state->short_head[short_hash] = short_tag | cur_pos;
+        if (save_short) {
+            uint32_t s_pos = old_short & UINT32_C(0x00ffffff);
+            uint32_t s_dist = (cur_pos - s_pos) & UINT32_C(0x00ffffff);
+            state->short_dist =
+                ((old_short & UINT32_C(0xff000000)) == short_tag &&
+                 s_pos && s_dist && s_dist <= DEFLATE_WINDOW && s_dist <= pos)
+                ? (uint16_t)s_dist : 0;
+        }
+    } else if (save_short) {
+        state->short_dist = 0;
     }
     if (size - pos < 6) return 0;
-    hash = deflate_hash6(src + pos);
+    {
+        uint32_t low;
+        uint16_t high;
+        uint64_t value;
+        memcpy(&low, src + pos, sizeof(low));
+        memcpy(&high, src + pos + 4, sizeof(high));
+        value = low | ((uint64_t)high << 32);
+        hprod = value * UINT64_C(0x9e3779b97f4a7c15);
+    }
+    hash = (unsigned)(hprod >> (64 - DEFLATE_HASH_BITS));
+    tag7 = (uint32_t)(hprod >> 16) & UINT32_C(0xfe000000);
     old = state->head[hash];
-    state->previous[pos & (DEFLATE_WINDOW - 1)] = old;
-    /* Modular positions retain the full window even beyond 4 GiB. Zero is
-     * the empty-link sentinel, sacrificing only one insertion per 4 GiB. */
-    state->head[hash] = (uint32_t)pos + 1;
-    return old;
+    old_pos = old & UINT32_C(0x00ffffff);
+    delta = (cur_pos - old_pos) & UINT32_C(0x00ffffff);
+    valid = old_pos && delta && delta <= DEFLATE_WINDOW && delta <= pos;
+    state->previous[pos & (DEFLATE_WINDOW - 1)] = valid ? (uint16_t)delta : 0;
+    state->head[hash] = tag7 | (valid ? UINT32_C(0x01000000) : 0u) | cur_pos;
+    if (!valid) return 0;
+    if (!(old & UINT32_C(0x01000000)) && (old & UINT32_C(0xfe000000)) != tag7)
+        return 0;
+    return delta;
 }
 
 /* Only timing depends on this: it requests the buckets that inserting
@@ -277,110 +276,113 @@ PTPNG_API_INLINE void deflate_prefetch(const deflate_state *state,
 #endif
 }
 
-#if DEFLATE_SINGLE_SHORT_LINK
 #define deflate_insert(state, src, pos, size) \
     deflate_insert_impl(state, src, pos, size, 1)
 #define deflate_insert_interior(state, src, pos, size) \
-    deflate_insert_impl(state, src, pos, size, 0)
-#else
-#define deflate_insert_interior deflate_insert
-#endif
+    ((void)deflate_insert_impl(state, src, pos, size, 0))
 
 static unsigned deflate_match(const deflate_state *state, const uint8_t *src,
-                              size_t pos, size_t end, uint32_t link,
+                              size_t pos, size_t end, unsigned first_dist,
                               unsigned minimum,
                               unsigned *best_distance)
 {
     unsigned limit = (unsigned)(end - pos > 258 ? 258 : end - pos);
-    unsigned best = minimum < 5 ? 5 : minimum, previous_distance = 0;
+    unsigned best = minimum < 5 ? 5 : minimum;
     unsigned attempts = DEFLATE_CHAIN, distance_best = 0;
-    uint32_t prefix_low;
-    uint32_t best_tail = 0;
-    uint16_t prefix_high;
-#if PTPNG_DEFLATE_WORD_STORE
-    uint64_t prefix_word = 0;
-#endif
+    unsigned distance = first_dist, tail_off;
+    uint32_t best_tail;
     *best_distance = 0;
-    if (!link || limit <= best) return 0;
-    memcpy(&prefix_low, src + pos, sizeof(prefix_low));
-    memcpy(&prefix_high, src + pos + 4, sizeof(prefix_high));
-    if (best > 5)
-        memcpy(&best_tail, src + pos + best - 3, sizeof(best_tail));
+    if (!distance || limit <= best) return 0;
+    if (best >= 8) attempts >>= 2;
+    /* Unify best == 5 (bytes 2..5 inside the 6-byte prefix) with best > 5:
+     * best < limit guarantees pos + best + 1 <= end. */
+    tail_off = best - 3;
+    memcpy(&best_tail, src + pos + tail_off, sizeof(best_tail));
 #if PTPNG_DEFLATE_WORD_STORE
     if (limit >= 8) {
+        uint64_t prefix_word;
         memcpy(&prefix_word, src + pos, sizeof(prefix_word));
         prefix_word &= UINT64_C(0x0000ffffffffffff);
+        while (attempts--) {
+            size_t ref = pos - distance;
+            unsigned step = state->previous[ref & (DEFLATE_WINDOW - 1)];
+            uint32_t candidate_tail;
+            memcpy(&candidate_tail, src + ref + tail_off, sizeof(candidate_tail));
+            if (candidate_tail == best_tail) {
+                uint64_t candidate;
+                memcpy(&candidate, src + ref, sizeof(candidate));
+                if ((candidate & UINT64_C(0x0000ffffffffffff)) == prefix_word) {
+                    unsigned length = 6;
+                    while (limit - length >= 8) {
+                        uint64_t a, b;
+                        memcpy(&a, src + ref + length, sizeof(a));
+                        memcpy(&b, src + pos + length, sizeof(b));
+                        if (a != b) {
+#if defined(_MSC_VER)
+                            unsigned long bit;
+                            _BitScanForward64(&bit, a ^ b);
+                            length += (unsigned)bit >> 3;
+#elif defined(__GNUC__) || defined(__clang__)
+                            length += (unsigned)__builtin_ctzll(a ^ b) >> 3;
+#else
+                            while (src[ref + length] == src[pos + length]) ++length;
+#endif
+                            goto match_done_fast;
+                        }
+                        length += 8;
+                    }
+                    while (length < limit && src[ref + length] == src[pos + length])
+                        ++length;
+match_done_fast:
+                    if (length > best) {
+                        best = length;
+                        distance_best = distance;
+                        if (best == limit || best >= 128) break;
+                        tail_off = best - 3;
+                        memcpy(&best_tail, src + pos + tail_off, sizeof(best_tail));
+                    }
+                }
+            }
+            if (!step) break;
+            distance += step;
+            if (distance > DEFLATE_WINDOW) break;
+        }
+        *best_distance = distance_best;
+        return distance_best ? best : 0;
     }
 #endif
-    if (best >= 8) attempts >>= 2;
-    while (link && attempts--) {
-        unsigned distance = (uint32_t)pos - (link - 1);
-        size_t ref;
-        unsigned length;
-        uint32_t next_link;
-        uint32_t candidate_tail;
-        int matches;
-        if (!distance || distance > DEFLATE_WINDOW || distance > pos ||
-            distance <= previous_distance) break;
-        ref = pos - distance;
-        next_link = state->previous[ref & (DEFLATE_WINDOW - 1)];
-        /* The six-byte prefix already proves an improvement over five.
-         * For longer best matches, reject candidates with four bytes ending
-         * at best before scanning their prefix. best < limit bounds both. */
-        if (best > 5) {
-            memcpy(&candidate_tail, src + ref + best - 3, sizeof(candidate_tail));
-            if (candidate_tail != best_tail) goto next_match;
-        }
-#if PTPNG_DEFLATE_WORD_STORE
-        if (limit >= 8) {
-            uint64_t candidate;
-            /* Masking keeps the same six-byte prefix. Both eight-byte loads
-             * are bounded by end, including references before pos. */
-            memcpy(&candidate, src + ref, sizeof(candidate));
-            matches = (candidate & UINT64_C(0x0000ffffffffffff)) == prefix_word;
-        } else
-#endif
-        {
-            uint32_t candidate_low;
-            uint16_t candidate_high;
-            memcpy(&candidate_low, src + ref, sizeof(candidate_low));
-            memcpy(&candidate_high, src + ref + 4, sizeof(candidate_high));
-            matches = candidate_low == prefix_low && candidate_high == prefix_high;
-        }
-        if (matches) {
-            length = 6;
-            while (limit - length >= 8) {
-                uint64_t a, b;
-                memcpy(&a, src + ref + length, sizeof(a));
-                memcpy(&b, src + pos + length, sizeof(b));
-                if (a != b) {
-#if PTPNG_DEFLATE_WORD_STORE && defined(_MSC_VER)
-                    unsigned long bit;
-                    _BitScanForward64(&bit, a ^ b);
-                    length += (unsigned)bit >> 3;
-#elif PTPNG_DEFLATE_WORD_STORE && (defined(__GNUC__) || defined(__clang__))
-                    length += (unsigned)__builtin_ctzll(a ^ b) >> 3;
-#else
-                    while (src[ref + length] == src[pos + length]) ++length;
-#endif
-                    /* The first differing byte is already known. */
-                    goto match_done;
+    {
+        uint32_t prefix_low;
+        uint16_t prefix_high;
+        memcpy(&prefix_low, src + pos, sizeof(prefix_low));
+        memcpy(&prefix_high, src + pos + 4, sizeof(prefix_high));
+        while (attempts--) {
+            size_t ref = pos - distance;
+            unsigned step = state->previous[ref & (DEFLATE_WINDOW - 1)];
+            uint32_t candidate_tail;
+            memcpy(&candidate_tail, src + ref + tail_off, sizeof(candidate_tail));
+            if (candidate_tail == best_tail) {
+                uint32_t candidate_low;
+                uint16_t candidate_high;
+                memcpy(&candidate_low, src + ref, sizeof(candidate_low));
+                memcpy(&candidate_high, src + ref + 4, sizeof(candidate_high));
+                if (candidate_low == prefix_low && candidate_high == prefix_high) {
+                    unsigned length = 6;
+                    while (length < limit && src[ref + length] == src[pos + length])
+                        ++length;
+                    if (length > best) {
+                        best = length;
+                        distance_best = distance;
+                        if (best == limit || best >= 128) break;
+                        tail_off = best - 3;
+                        memcpy(&best_tail, src + pos + tail_off, sizeof(best_tail));
+                    }
                 }
-                length += 8;
             }
-            while (length < limit && src[ref + length] == src[pos + length])
-                ++length;
-match_done:
-            if (length > best) {
-                best = length;
-                distance_best = distance;
-                if (best == limit || best >= 128) break;
-                memcpy(&best_tail, src + pos + best - 3, sizeof(best_tail));
-            }
+            if (!step) break;
+            distance += step;
+            if (distance > DEFLATE_WINDOW) break;
         }
-next_match:
-        previous_distance = distance;
-        link = next_link;
     }
     *best_distance = distance_best;
     return distance_best ? best : 0;
@@ -395,74 +397,45 @@ static unsigned deflate_short_match(const deflate_state *state, const uint8_t *s
                                     unsigned *best_distance)
 {
     unsigned limit = (unsigned)(end - pos > 5 ? 5 : end - pos);
-    unsigned attempts = DEFLATE_SHORT_CHAIN, previous_distance = 0, best = 0, best_saving = 0;
-    unsigned distance_best = 0;
-    uint32_t link;
-#if PTPNG_DEFLATE_WORD_STORE
-    uint32_t prefix = 0;
-#endif
+    unsigned distance = state->short_dist;
+    size_t ref;
+    unsigned length, cost, literal_cost;
+    int matches;
     *best_distance = 0;
-    if (limit < 3 || limit <= minimum) return 0;
-#if DEFLATE_SINGLE_SHORT_LINK
-    link = state->short_link;
-#else
-    link = state->short_previous[pos & (DEFLATE_WINDOW - 1)];
-#endif
-    if (!link) return 0;
+    if (!distance || limit < 3 || limit <= minimum) return 0;
+    ref = pos - distance;
 #if PTPNG_DEFLATE_WORD_STORE
-    if (limit >= 4) memcpy(&prefix, src + pos, sizeof(prefix));
-    else prefix = src[pos] | ((uint32_t)src[pos + 1] << 8) |
-                  ((uint32_t)src[pos + 2] << 16);
-    prefix &= UINT32_C(0x00ffffff);
-#endif
-    while (link && attempts--) {
-        unsigned distance = (uint32_t)pos - (link - 1);
-        unsigned length, cost, literal_cost;
-        uint32_t next_link;
-        size_t ref;
-        int matches;
-        if (!distance || distance > DEFLATE_WINDOW || distance > pos ||
-            distance <= previous_distance) break;
-        ref = pos - distance;
-#if DEFLATE_SINGLE_SHORT_LINK
-        next_link = 0;
-#else
-        next_link = state->short_previous[ref & (DEFLATE_WINDOW - 1)];
-#endif
-#if PTPNG_DEFLATE_WORD_STORE
-        {
-            uint32_t candidate = 0;
-            if (limit >= 4) memcpy(&candidate, src + ref, sizeof(candidate));
-            else candidate = src[ref] | ((uint32_t)src[ref + 1] << 8) |
-                             ((uint32_t)src[ref + 2] << 16);
-            matches = (candidate & UINT32_C(0x00ffffff)) == prefix;
+    {
+        uint32_t prefix = 0, candidate = 0;
+        if (limit >= 4) {
+            memcpy(&prefix, src + pos, sizeof(prefix));
+            memcpy(&candidate, src + ref, sizeof(candidate));
+        } else {
+            prefix = src[pos] | ((uint32_t)src[pos + 1] << 8) |
+                     ((uint32_t)src[pos + 2] << 16);
+            candidate = src[ref] | ((uint32_t)src[ref + 1] << 8) |
+                        ((uint32_t)src[ref + 2] << 16);
         }
-#else
-        matches = src[ref] == src[pos] && src[ref + 1] == src[pos + 1] &&
-                  src[ref + 2] == src[pos + 2];
-#endif
-        if (matches) {
-            length = 3;
-            while (length < limit && src[ref + length] == src[pos + length]) ++length;
-            if (length > minimum) {
-                cost = 14 + (distance <= 4 ? 0 : deflate_log2(distance - 1) - 1);
-                /* Every short match covers three bytes, and at most five. */
-                literal_cost = literal_bits[src[pos]] + literal_bits[src[pos + 1]] +
-                               literal_bits[src[pos + 2]];
-                if (length > 3) literal_cost += literal_bits[src[pos + 3]];
-                if (length > 4) literal_cost += literal_bits[src[pos + 4]];
-                if (literal_cost > cost && literal_cost - cost > best_saving) {
-                    best = length;
-                    distance_best = distance;
-                    best_saving = literal_cost - cost;
-                }
-            }
-        }
-        previous_distance = distance;
-        link = next_link;
+        matches = ((prefix ^ candidate) & UINT32_C(0x00ffffff)) == 0;
     }
-    *best_distance = distance_best;
-    return best;
+#else
+    matches = src[ref] == src[pos] && src[ref + 1] == src[pos + 1] &&
+              src[ref + 2] == src[pos + 2];
+#endif
+    if (!matches) return 0;
+    length = 3;
+    while (length < limit && src[ref + length] == src[pos + length]) ++length;
+    if (length <= minimum) return 0;
+    cost = 14 + (distance <= 4 ? 0 : deflate_log2(distance - 1) - 1);
+    literal_cost = literal_bits[src[pos]] + literal_bits[src[pos + 1]] +
+                   literal_bits[src[pos + 2]];
+    if (length > 3) literal_cost += literal_bits[src[pos + 3]];
+    if (length > 4) literal_cost += literal_bits[src[pos + 4]];
+    if (literal_cost > cost) {
+        *best_distance = distance;
+        return length;
+    }
+    return 0;
 }
 
 static size_t deflate_parse(deflate_state *state, const uint8_t *src,
@@ -474,43 +447,52 @@ static size_t deflate_parse(deflate_state *state, const uint8_t *src,
                          DEFLATE_BLOCK_BYTES : size - start);
     size_t pos = start;
     unsigned count = 0, cached = 0, cached_length = 0, cached_distance = 0;
-    uint32_t sample_freq[256] = {0};
+    uint32_t sf[4][256];
     uint8_t literal_bits[256];
     unsigned sample_size = (unsigned)(end - start > 65536 ? 65536 : end - start);
     unsigned sample;
-    /* Approximate literal code lengths from the next 64 KiB. This only
-     * guides short-match selection; emitted trees use exact token counts. */
-    for (sample = 0; sample < sample_size; ++sample) ++sample_freq[src[start + sample]];
+    /* Approximate literal code lengths from the next 64 KiB using a 4-way
+     * unrolled histogram to avoid store-forwarding stalls on repeated bytes. */
+    memset(sf, 0, sizeof(sf));
+    for (sample = 0; sample + 4 <= sample_size; sample += 4) {
+        ++sf[0][src[start + sample]];
+        ++sf[1][src[start + sample + 1]];
+        ++sf[2][src[start + sample + 2]];
+        ++sf[3][src[start + sample + 3]];
+    }
+    for (; sample < sample_size; ++sample)
+        ++sf[0][src[start + sample]];
     for (sample = 0; sample < 256; ++sample) {
+        uint32_t freq = sf[0][sample] + sf[1][sample] + sf[2][sample] + sf[3][sample];
         unsigned bits = 1;
-        while (bits < 9 && sample_freq[sample] < (sample_size >> bits)) ++bits;
+        while (bits < 9 && freq < (sample_size >> bits)) ++bits;
         literal_bits[sample] = (uint8_t)bits;
     }
     memset(lit_freq, 0, 286 * sizeof(*lit_freq));
     memset(dist_freq, 0, 30 * sizeof(*dist_freq));
     *extra_bits = 0;
     while (pos < end && count < DEFLATE_TOKENS) {
-        unsigned length, distance, inserted_next = 0;
+        unsigned length, distance = 0, inserted_next = 0;
         if (cached) {
             length = cached_length;
             distance = cached_distance;
             cached = 0;
         } else {
-            uint32_t link = deflate_insert(state, src, pos, size);
-            length = deflate_match(state, src, pos, end, link, 5, &distance);
-            if (!length)
+            unsigned first_dist = deflate_insert(state, src, pos, size);
+            length = first_dist ? deflate_match(state, src, pos, end, first_dist, 5, &distance) : 0;
+            if (!length && state->short_dist)
                 length = deflate_short_match(state, src, pos, end, 2, literal_bits, &distance);
         }
         /* A one-byte lookahead avoids committing to a short match directly
-         * before a longer one. Every consumed position joins the chain. */
+         * before a longer one. */
         if (length >= 3 && length < 64 && end - pos >= 4 &&
             count + 1 < DEFLATE_TOKENS) {
-            unsigned next_distance, next_length;
-            uint32_t link = deflate_insert(state, src, pos + 1, size);
+            unsigned next_distance = 0, next_length;
+            unsigned first_dist = deflate_insert(state, src, pos + 1, size);
             inserted_next = 1;
-            next_length = deflate_match(state, src, pos + 1, end, link, length,
-                                        &next_distance);
-            if (!next_length)
+            next_length = first_dist ? deflate_match(state, src, pos + 1, end, first_dist, length,
+                                                     &next_distance) : 0;
+            if (!next_length && length < 5 && state->short_dist)
                 next_length = deflate_short_match(state, src, pos + 1, end, length,
                                                   literal_bits, &next_distance);
             if (next_length > length) {
@@ -525,15 +507,21 @@ static size_t deflate_parse(deflate_state *state, const uint8_t *src,
         }
         if (length >= 3) {
             unsigned ls = len_symbol[length], ds = deflate_dist_symbol(distance);
-            size_t insert;
+            size_t insert = pos + 1 + inserted_next;
             state->tokens[count].value = (uint16_t)length;
             state->tokens[count++].distance = (uint16_t)distance;
             ++lit_freq[257 + ls];
             ++dist_freq[ds];
             *extra_bits += deflate_len_extra[ls] + (ds < 4 ? 0 : (ds >> 1) - 1);
-            /* The next search inserts its own position first, so interior
-             * single-candidate predecessor links are never observed. */
-            for (insert = pos + 1 + inserted_next; insert < pos + length; ++insert)
+            /* For short-period runs (distance <= 8), every phase repeats at
+             * the end of the match; inserting only the final distance + 5
+             * positions preserves all phases and exit boundaries without
+             * polluting hash chains with hundreds of duplicate entries. */
+            if (distance <= 8 && length > distance + 6) {
+                size_t tail = pos + length - distance - 5;
+                if (tail > insert) insert = tail;
+            }
+            for (; insert < pos + length; ++insert)
                 deflate_insert_interior(state, src, insert, size);
             pos += length;
         } else {
@@ -548,38 +536,34 @@ static size_t deflate_parse(deflate_state *state, const uint8_t *src,
     return pos;
 }
 
-static int deflate_heap_less(unsigned a, unsigned b, const uint32_t *weights)
-{
-    return weights[a] < weights[b] || (weights[a] == weights[b] && a < b);
-}
-
-static void deflate_heap_push(uint16_t *heap, unsigned *count, unsigned node,
-                              const uint32_t *weights)
+/* Packed key: (weight << 10) | node_id. Max weight is 32769 (< 2^16), max
+ * node_id is 571 (< 1024), so integer comparison matches (weight, node) order
+ * directly without indirect memory loads. */
+static void deflate_heap_push(uint32_t *heap, unsigned *count, uint32_t key)
 {
     unsigned at = (*count)++;
     while (at) {
         unsigned parent = (at - 1) >> 1;
-        if (!deflate_heap_less(node, heap[parent], weights)) break;
+        if (heap[parent] <= key) break;
         heap[at] = heap[parent];
         at = parent;
     }
-    heap[at] = (uint16_t)node;
+    heap[at] = key;
 }
 
-static unsigned deflate_heap_pop(uint16_t *heap, unsigned *count,
-                                 const uint32_t *weights)
+static uint32_t deflate_heap_pop(uint32_t *heap, unsigned *count)
 {
-    unsigned result = heap[0], last = heap[--*count], at = 0;
-    while (at * 2 + 1 < *count) {
+    uint32_t result = heap[0], last = heap[--*count];
+    unsigned n = *count, at = 0;
+    while (at * 2 + 1 < n) {
         unsigned child = at * 2 + 1;
-        if (child + 1 < *count && deflate_heap_less(heap[child + 1],
-                                                   heap[child], weights))
+        if (child + 1 < n && heap[child + 1] < heap[child])
             ++child;
-        if (!deflate_heap_less(heap[child], last, weights)) break;
+        if (last <= heap[child]) break;
         heap[at] = heap[child];
         at = child;
     }
-    if (*count) heap[at] = (uint16_t)last;
+    if (n) heap[at] = last;
     return result;
 }
 
@@ -590,42 +574,41 @@ static void deflate_huffman(const uint32_t *freq, unsigned alphabet,
                              unsigned max_bits, uint8_t *lengths,
                              uint32_t *codes)
 {
-    uint32_t weights[572] = {0};
-    uint16_t parents[572], heap[286], order[286];
+    uint32_t heap[286], order[286];
+    uint16_t parents[572];
+    uint8_t depths[572];
     unsigned counts[16] = {0}, next_code[16];
     unsigned used = 0, heap_count = 0, next = alphabet, i, bits, slots = 0;
-    memset(parents, 255, sizeof(parents));
     memset(lengths, 0, alphabet * sizeof(*lengths));
     memset(codes, 0, alphabet * sizeof(*codes));
     for (i = 0; i < alphabet; ++i) {
-        if (freq[i]) {
-            weights[i] = freq[i];
-            order[used++] = (uint16_t)i;
-        }
+        if (freq[i])
+            order[used++] = (freq[i] << 10) | i;
     }
     for (i = 0; used < 2; ++i) {
-        if (!weights[i]) {
-            weights[i] = 1;
-            order[used++] = (uint16_t)i;
-        }
+        if (!freq[i])
+            order[used++] = (1u << 10) | i;
     }
     for (i = 0; i < used; ++i)
-        deflate_heap_push(heap, &heap_count, order[i], weights);
+        deflate_heap_push(heap, &heap_count, order[i]);
     while (heap_count > 1) {
-        unsigned a = deflate_heap_pop(heap, &heap_count, weights);
-        unsigned b = deflate_heap_pop(heap, &heap_count, weights);
+        uint32_t ka = deflate_heap_pop(heap, &heap_count);
+        uint32_t kb = deflate_heap_pop(heap, &heap_count);
+        unsigned a = ka & 1023u, b = kb & 1023u;
+        uint32_t combined = (ka & ~1023u) + (kb & ~1023u);
         parents[a] = parents[b] = (uint16_t)next;
-        weights[next] = weights[a] + weights[b];
-        deflate_heap_push(heap, &heap_count, next++, weights);
+        deflate_heap_push(heap, &heap_count, combined | next++);
+    }
+    /* Compute depths top-down in O(n): internal nodes have parents[i] > i. */
+    depths[next - 1] = 0;
+    for (i = next - 1; i > alphabet; ) {
+        --i;
+        depths[i] = (uint8_t)(depths[parents[i]] + 1);
     }
     for (i = 0; i < used; ++i) {
-        unsigned node = order[i], depth = 0;
-        while (parents[node] != UINT16_MAX) {
-            ++depth;
-            node = parents[node];
-        }
-        if (depth > max_bits) depth = max_bits;
-        ++counts[depth];
+        unsigned d = (unsigned)depths[parents[order[i] & 1023u]] + 1;
+        if (d > max_bits) d = max_bits;
+        ++counts[d];
     }
     for (bits = 1; bits <= max_bits; ++bits)
         slots += counts[bits] << (max_bits - bits);
@@ -638,17 +621,18 @@ static void deflate_huffman(const uint32_t *freq, unsigned alphabet,
         --slots;
     }
     for (i = 1; i < used; ++i) {
-        unsigned j = i, symbol = order[i];
-        while (j && deflate_heap_less(symbol, order[j - 1], weights)) {
+        unsigned j = i;
+        uint32_t key = order[i];
+        while (j && key < order[j - 1]) {
             order[j] = order[j - 1];
             --j;
         }
-        order[j] = (uint16_t)symbol;
+        order[j] = key;
     }
     next = 0;
     for (bits = max_bits; bits; --bits) {
         for (i = 0; i < counts[bits]; ++i)
-            lengths[order[next++]] = (uint8_t)bits;
+            lengths[order[next++] & 1023u] = (uint8_t)bits;
     }
     next = 0;
     for (bits = 1; bits <= max_bits; ++bits) {
@@ -756,6 +740,69 @@ static int deflate_emit_tokens(deflate_writer *w, const deflate_token *tokens,
                                const uint8_t len_symbol[259])
 {
     unsigned i;
+#if PTPNG_DEFLATE_WORD_STORE
+    /* Keep writer state in local registers so dst byte stores cannot alias w.
+     * Invariant: bitcnt <= 15 at the top of each iteration, so a 15-bit literal
+     * fits below 31 bits and a full 48-bit match fits below 64 bits. */
+    uint8_t *dst = w->dst;
+    size_t pos = w->pos, limit = w->limit;
+    uint64_t bits = w->bits;
+    unsigned bitcnt = w->count;
+#define EMIT_FLUSH() do {                                                   \
+        unsigned bytes_ = bitcnt >> 3;                                      \
+        if (limit - pos >= 8) {                                             \
+            memcpy(dst + pos, &bits, sizeof(bits));                         \
+            pos += bytes_;                                                  \
+            bits >>= bytes_ * 8;                                            \
+            bitcnt &= 7;                                                    \
+        } else {                                                            \
+            unsigned j_;                                                    \
+            if (bytes_ > limit - pos) return 0;                             \
+            for (j_ = 0; j_ < bytes_; ++j_)                                 \
+                dst[pos + j_] = (uint8_t)(bits >> (8 * j_));                \
+            pos += bytes_;                                                  \
+            bits >>= bytes_ * 8;                                            \
+            bitcnt &= 7;                                                    \
+        }                                                                   \
+    } while (0)
+    for (i = 0; i < count; ++i) {
+        unsigned value = tokens[i].value, distance = tokens[i].distance;
+        if (!distance) {
+            uint32_t code = lit_codes[value];
+            bits |= (uint64_t)(code & 65535u) << bitcnt;
+            bitcnt += code >> 16;
+            if (bitcnt >= 16) EMIT_FLUSH();
+        } else {
+            unsigned ls = len_symbol[value], ds = deflate_dist_symbol(distance);
+            uint32_t lcode = lit_codes[257 + ls];
+            uint32_t dcode = dist_codes[ds];
+            unsigned lbits = lcode >> 16;
+            unsigned dbits = dcode >> 16;
+            unsigned lextra = deflate_len_extra[ls];
+            unsigned dextra = ds < 4 ? 0 : (ds >> 1) - 1;
+            bits |= (uint64_t)(lcode & 65535u) << bitcnt;
+            bitcnt += lbits;
+            bits |= (uint64_t)(value - deflate_len_base[ls]) << bitcnt;
+            bitcnt += lextra;
+            bits |= (uint64_t)(dcode & 65535u) << bitcnt;
+            bitcnt += dbits;
+            bits |= (uint64_t)(distance - deflate_dist_base[ds]) << bitcnt;
+            bitcnt += dextra;
+            EMIT_FLUSH();
+        }
+    }
+    {
+        uint32_t eob = lit_codes[256];
+        bits |= (uint64_t)(eob & 65535u) << bitcnt;
+        bitcnt += eob >> 16;
+        EMIT_FLUSH();
+    }
+#undef EMIT_FLUSH
+    w->pos = pos;
+    w->bits = bits;
+    w->count = bitcnt;
+    return 1;
+#else
     for (i = 0; i < count; ++i) {
         unsigned value = tokens[i].value, distance = tokens[i].distance;
         if (!distance) {
@@ -775,6 +822,7 @@ static int deflate_emit_tokens(deflate_writer *w, const deflate_token *tokens,
         }
     }
     return deflate_code(w, lit_codes[256]);
+#endif
 }
 
 static int deflate_align(deflate_writer *w)
@@ -812,22 +860,27 @@ static int deflate_stored_block(deflate_writer *w, const uint8_t *src,
 static int deflate_compress(deflate_writer *w, deflate_state *state,
                             const uint8_t *src, size_t size)
 {
-    uint32_t fixed_lit[286], fixed_dist[30], lit_freq[286], dist_freq[30];
-    uint8_t len_symbol[259] = {0};
+    static uint32_t fixed_lit[286], fixed_dist[30];
+    static uint8_t len_symbol[259];
+    static int tables_ready = 0;
+    uint32_t lit_freq[286], dist_freq[30];
     deflate_tree tree;
     size_t pos = 0;
     unsigned i;
-    for (i = 0; i < 286; ++i) {
-        unsigned bits = i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8;
-        unsigned code = i < 144 ? i + 48 : i < 256 ? i + 256 :
-                        i < 280 ? i - 256 : i - 88;
-        fixed_lit[i] = deflate_reverse(code, bits) | (bits << 16);
-    }
-    for (i = 0; i < 30; ++i)
-        fixed_dist[i] = deflate_reverse(i, 5) | (5u << 16);
-    for (i = 0; i < 29; ++i) {
-        unsigned n, end = i == 28 ? 259 : deflate_len_base[i + 1];
-        for (n = deflate_len_base[i]; n < end; ++n) len_symbol[n] = (uint8_t)i;
+    if (!tables_ready) {
+        for (i = 0; i < 286; ++i) {
+            unsigned bits = i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8;
+            unsigned code = i < 144 ? i + 48 : i < 256 ? i + 256 :
+                            i < 280 ? i - 256 : i - 88;
+            fixed_lit[i] = deflate_reverse(code, bits) | (bits << 16);
+        }
+        for (i = 0; i < 30; ++i)
+            fixed_dist[i] = deflate_reverse(i, 5) | (5u << 16);
+        for (i = 0; i < 29; ++i) {
+            unsigned n, end = i == 28 ? 259 : deflate_len_base[i + 1];
+            for (n = deflate_len_base[i]; n < end; ++n) len_symbol[n] = (uint8_t)i;
+        }
+        tables_ready = 1;
     }
     if (!size)
         return deflate_put(w, 3, 3) && deflate_code(w, fixed_lit[256]) &&

@@ -41,6 +41,13 @@ static int choose_filter(uint8_t *dst, uint8_t *scratch, const uint8_t *src,
 {
     uint64_t best_score = score(src, count);
     int best = 0, f;
+    /* Identical nonzero rows always pick Up (zero residual); Sub cannot
+     * achieve zero without None already being zero. */
+    if (best_score && prev && count && src[0] == prev[0] &&
+        memcmp(src, prev, count) == 0) {
+        memset(dst, 0, count);
+        return 2;
+    }
     memcpy(dst, src, count);
     for (f = 1; f < 5 && best_score; ++f) {
         uint64_t candidate;
@@ -66,6 +73,11 @@ static int choose_filter(uint8_t *dst, uint8_t *scratch, const uint8_t *src,
     const uint8_t *best_row = src;
     uint64_t best_score = score(src, count);
     int best = 0, f;
+    if (best_score && prev && count && src[0] == prev[0] &&
+        memcmp(src, prev, count) == 0) {
+        memset(dst, 0, count);
+        return 2;
+    }
     for (f = 1; f < 5 && best_score; ++f) {
         uint64_t candidate;
         /* On the first row Up duplicates None and Paeth duplicates Sub. */
