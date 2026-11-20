@@ -534,23 +534,23 @@ static void rgb8_p8(const uint8_t *src, uint8_t *dst, uint32_t n,
                     const struct ptpng_cvt *c)
 {
     const uint8_t *pal = c->pal_rgba;
-    uint32_t i = 0;
+    const uint8_t *s = src;
 #if PTPNG_X64 || defined(_M_ARM64) || \
     (defined(__aarch64__) && defined(__BYTE_ORDER__) && \
      defined(__ORDER_LITTLE_ENDIAN__) && \
      __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
-    for (; i + 8 <= n; i += 8, dst += 24) {
+    for (; n >= 8; n -= 8, s += 8, dst += 24) {
         uint32_t u0, u1, u2, u3, u4, u5, u6, u7;
         uint64_t p0, p1, p2, p3, p4, p5, p6, p7;
         uint64_t w0, w1, w2;
-        memcpy(&u0, pal + (size_t)src[i] * 4, 4);
-        memcpy(&u1, pal + (size_t)src[i + 1] * 4, 4);
-        memcpy(&u2, pal + (size_t)src[i + 2] * 4, 4);
-        memcpy(&u3, pal + (size_t)src[i + 3] * 4, 4);
-        memcpy(&u4, pal + (size_t)src[i + 4] * 4, 4);
-        memcpy(&u5, pal + (size_t)src[i + 5] * 4, 4);
-        memcpy(&u6, pal + (size_t)src[i + 6] * 4, 4);
-        memcpy(&u7, pal + (size_t)src[i + 7] * 4, 4);
+        memcpy(&u0, pal + (size_t)s[0] * 4, 4);
+        memcpy(&u1, pal + (size_t)s[1] * 4, 4);
+        memcpy(&u2, pal + (size_t)s[2] * 4, 4);
+        memcpy(&u3, pal + (size_t)s[3] * 4, 4);
+        memcpy(&u4, pal + (size_t)s[4] * 4, 4);
+        memcpy(&u5, pal + (size_t)s[5] * 4, 4);
+        memcpy(&u6, pal + (size_t)s[6] * 4, 4);
+        memcpy(&u7, pal + (size_t)s[7] * 4, 4);
         p0 = u0 & UINT32_C(0xFFFFFF);
         p1 = u1 & UINT32_C(0xFFFFFF);
         p2 = u2 & UINT32_C(0xFFFFFF);
@@ -567,12 +567,10 @@ static void rgb8_p8(const uint8_t *src, uint8_t *dst, uint32_t n,
         memcpy(dst + 16, &w2, 8);
     }
 #endif
-    for (; i + 1 < n; i++) {
-        memcpy(dst, pal + (size_t)src[i] * 4, 4);
-        dst += 3;
-    }
-    if (i < n)
-        memcpy(dst, pal + (size_t)src[i] * 4, 3);
+    for (; n > 1; --n, ++s, dst += 3)
+        memcpy(dst, pal + (size_t)*s * 4, 4);
+    if (n)
+        memcpy(dst, pal + (size_t)*s * 4, 3);
 }
 
 static void rgb8_ga8(const uint8_t *src, uint8_t *dst, uint32_t n,

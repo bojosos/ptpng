@@ -128,19 +128,30 @@ static void ptpng_filter_paeth_neon(uint8_t *dst, const uint8_t *src,
             vst1_u8(dst + i, vmovn_u16(a));
         }
     } else if (bpp == 6) {
-        for (; i + 8 <= count; i += 6) {
-            uint16x8_t b = vmovl_u8(vld1_u8(prev + i));
-            uint16x8_t s = vmovl_u8(vld1_u8(src + i));
-            uint64_t output;
-            uint32_t lo32;
-            uint16_t hi16;
-            a = paeth_pixel_neon(s, a, b, c);
-            c = b;
-            output = vget_lane_u64(vreinterpret_u64_u8(vmovn_u16(a)), 0);
-            lo32 = (uint32_t)output;
-            hi16 = (uint16_t)(output >> 32);
-            memcpy(dst + i, &lo32, 4);
-            memcpy(dst + i + 4, &hi16, 2);
+        uintptr_t du = (uintptr_t)dst, su = (uintptr_t)src;
+        if ((su >= du && su - du >= 2) || (du >= su && du - su >= count)) {
+            for (; i + 8 <= count; i += 6) {
+                uint16x8_t b = vmovl_u8(vld1_u8(prev + i));
+                uint16x8_t s = vmovl_u8(vld1_u8(src + i));
+                a = paeth_pixel_neon(s, a, b, c);
+                c = b;
+                vst1_u8(dst + i, vmovn_u16(a));
+            }
+        } else {
+            for (; i + 8 <= count; i += 6) {
+                uint16x8_t b = vmovl_u8(vld1_u8(prev + i));
+                uint16x8_t s = vmovl_u8(vld1_u8(src + i));
+                uint64_t output;
+                uint32_t lo32;
+                uint16_t hi16;
+                a = paeth_pixel_neon(s, a, b, c);
+                c = b;
+                output = vget_lane_u64(vreinterpret_u64_u8(vmovn_u16(a)), 0);
+                lo32 = (uint32_t)output;
+                hi16 = (uint16_t)(output >> 32);
+                memcpy(dst + i, &lo32, 4);
+                memcpy(dst + i + 4, &hi16, 2);
+            }
         }
     } else if (bpp == 4) {
         for (; i + 4 <= count; i += 4) {
@@ -157,20 +168,37 @@ static void ptpng_filter_paeth_neon(uint8_t *dst, const uint8_t *src,
             memcpy(dst + i, &output, 4);
         }
     } else if (bpp == 3) {
-        for (; i + 4 <= count; i += 3) {
-            uint32_t sv, bv, output;
-            uint16_t lo16;
-            uint16x8_t b, s;
-            memcpy(&sv, src + i, 4);
-            memcpy(&bv, prev + i, 4);
-            b = vmovl_u8(vcreate_u8(bv));
-            s = vmovl_u8(vcreate_u8(sv));
-            a = paeth_pixel_neon(s, a, b, c);
-            c = b;
-            output = vget_lane_u32(vreinterpret_u32_u8(vmovn_u16(a)), 0);
-            lo16 = (uint16_t)output;
-            memcpy(dst + i, &lo16, 2);
-            dst[i + 2] = (uint8_t)(output >> 16);
+        uintptr_t du = (uintptr_t)dst, su = (uintptr_t)src;
+        if ((su >= du && su - du >= 1) || (du >= su && du - su >= count)) {
+            /* Safe 4-byte vector store avoids NEON->GPR fmov latency. */
+            for (; i + 4 <= count; i += 3) {
+                uint32_t sv, bv, output;
+                uint16x8_t b, s;
+                memcpy(&sv, src + i, 4);
+                memcpy(&bv, prev + i, 4);
+                b = vmovl_u8(vcreate_u8(bv));
+                s = vmovl_u8(vcreate_u8(sv));
+                a = paeth_pixel_neon(s, a, b, c);
+                c = b;
+                output = vget_lane_u32(vreinterpret_u32_u8(vmovn_u16(a)), 0);
+                memcpy(dst + i, &output, 4);
+            }
+        } else {
+            for (; i + 4 <= count; i += 3) {
+                uint32_t sv, bv, output;
+                uint16_t lo16;
+                uint16x8_t b, s;
+                memcpy(&sv, src + i, 4);
+                memcpy(&bv, prev + i, 4);
+                b = vmovl_u8(vcreate_u8(bv));
+                s = vmovl_u8(vcreate_u8(sv));
+                a = paeth_pixel_neon(s, a, b, c);
+                c = b;
+                output = vget_lane_u32(vreinterpret_u32_u8(vmovn_u16(a)), 0);
+                lo16 = (uint16_t)output;
+                memcpy(dst + i, &lo16, 2);
+                dst[i + 2] = (uint8_t)(output >> 16);
+            }
         }
     } else {
         ptpng_filter_paeth_scalar(dst, src, prev, count, bpp);

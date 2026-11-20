@@ -39,10 +39,16 @@ static int choose_filter(uint8_t *dst, uint8_t *scratch, const uint8_t *src,
                          const uint8_t *prev, size_t count, unsigned bpp,
                          ptpng_encode_filter_fn forward, ptpng_encode_score_fn score)
 {
-    uint64_t best_score = score(src, count);
+    uint64_t best_score;
     int best = 0, f;
-    /* Identical nonzero rows always pick Up (zero residual); Sub cannot
-     * achieve zero without None already being zero. */
+    /* Identical nonzero rows always pick Up (zero residual); if src[0] != 0
+     * then None and Sub both have positive score, skipping score(src) too. */
+    if (prev && count && src[0] && src[0] == prev[0] &&
+        memcmp(src, prev, count) == 0) {
+        memset(dst, 0, count);
+        return 2;
+    }
+    best_score = score(src, count);
     if (best_score && prev && count && src[0] == prev[0] &&
         memcmp(src, prev, count) == 0) {
         memset(dst, 0, count);
@@ -71,8 +77,14 @@ static int choose_filter(uint8_t *dst, uint8_t *scratch, const uint8_t *src,
 {
     uint8_t *candidate_row = scratch;
     const uint8_t *best_row = src;
-    uint64_t best_score = score(src, count);
+    uint64_t best_score;
     int best = 0, f;
+    if (prev && count && src[0] && src[0] == prev[0] &&
+        memcmp(src, prev, count) == 0) {
+        memset(dst, 0, count);
+        return 2;
+    }
+    best_score = score(src, count);
     if (best_score && prev && count && src[0] == prev[0] &&
         memcmp(src, prev, count) == 0) {
         memset(dst, 0, count);

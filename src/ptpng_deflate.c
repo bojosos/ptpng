@@ -20,6 +20,65 @@ static const uint16_t deflate_len_base[29] = {
 static const uint8_t deflate_len_extra[29] = {
     0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0
 };
+static const uint8_t deflate_len_symbol[259] = {
+     0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 8, 9, 9,10,10,11,11,12,
+    12,12,12,13,13,13,13,14,14,14,14,15,15,15,15,16,16,16,16,16,
+    16,16,16,17,17,17,17,17,17,17,17,18,18,18,18,18,18,18,18,19,
+    19,19,19,19,19,19,19,20,20,20,20,20,20,20,20,20,20,20,20,20,
+    20,20,20,21,21,21,21,21,21,21,21,21,21,21,21,21,21,21,21,22,
+    22,22,22,22,22,22,22,22,22,22,22,22,22,22,22,23,23,23,23,23,
+    23,23,23,23,23,23,23,23,23,23,23,24,24,24,24,24,24,24,24,24,
+    24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,24,
+    24,24,24,25,25,25,25,25,25,25,25,25,25,25,25,25,25,25,25,25,
+    25,25,25,25,25,25,25,25,25,25,25,25,25,25,25,26,26,26,26,26,
+    26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,26,
+    26,26,26,26,26,26,26,27,27,27,27,27,27,27,27,27,27,27,27,27,
+    27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,27,28
+};
+static const uint32_t deflate_fixed_dist[30] = {
+    0x50000,0x50010,0x50008,0x50018,0x50004,0x50014,0x5000c,0x5001c,
+    0x50002,0x50012,0x5000a,0x5001a,0x50006,0x50016,0x5000e,0x5001e,
+    0x50001,0x50011,0x50009,0x50019,0x50005,0x50015,0x5000d,0x5001d,
+    0x50003,0x50013,0x5000b,0x5001b,0x50007,0x50017
+};
+static const uint32_t deflate_fixed_lit[286] = {
+    0x8000c,0x8008c,0x8004c,0x800cc,0x8002c,0x800ac,0x8006c,0x800ec,
+    0x8001c,0x8009c,0x8005c,0x800dc,0x8003c,0x800bc,0x8007c,0x800fc,
+    0x80002,0x80082,0x80042,0x800c2,0x80022,0x800a2,0x80062,0x800e2,
+    0x80012,0x80092,0x80052,0x800d2,0x80032,0x800b2,0x80072,0x800f2,
+    0x8000a,0x8008a,0x8004a,0x800ca,0x8002a,0x800aa,0x8006a,0x800ea,
+    0x8001a,0x8009a,0x8005a,0x800da,0x8003a,0x800ba,0x8007a,0x800fa,
+    0x80006,0x80086,0x80046,0x800c6,0x80026,0x800a6,0x80066,0x800e6,
+    0x80016,0x80096,0x80056,0x800d6,0x80036,0x800b6,0x80076,0x800f6,
+    0x8000e,0x8008e,0x8004e,0x800ce,0x8002e,0x800ae,0x8006e,0x800ee,
+    0x8001e,0x8009e,0x8005e,0x800de,0x8003e,0x800be,0x8007e,0x800fe,
+    0x80001,0x80081,0x80041,0x800c1,0x80021,0x800a1,0x80061,0x800e1,
+    0x80011,0x80091,0x80051,0x800d1,0x80031,0x800b1,0x80071,0x800f1,
+    0x80009,0x80089,0x80049,0x800c9,0x80029,0x800a9,0x80069,0x800e9,
+    0x80019,0x80099,0x80059,0x800d9,0x80039,0x800b9,0x80079,0x800f9,
+    0x80005,0x80085,0x80045,0x800c5,0x80025,0x800a5,0x80065,0x800e5,
+    0x80015,0x80095,0x80055,0x800d5,0x80035,0x800b5,0x80075,0x800f5,
+    0x8000d,0x8008d,0x8004d,0x800cd,0x8002d,0x800ad,0x8006d,0x800ed,
+    0x8001d,0x8009d,0x8005d,0x800dd,0x8003d,0x800bd,0x8007d,0x800fd,
+    0x90013,0x90113,0x90093,0x90193,0x90053,0x90153,0x900d3,0x901d3,
+    0x90033,0x90133,0x900b3,0x901b3,0x90073,0x90173,0x900f3,0x901f3,
+    0x9000b,0x9010b,0x9008b,0x9018b,0x9004b,0x9014b,0x900cb,0x901cb,
+    0x9002b,0x9012b,0x900ab,0x901ab,0x9006b,0x9016b,0x900eb,0x901eb,
+    0x9001b,0x9011b,0x9009b,0x9019b,0x9005b,0x9015b,0x900db,0x901db,
+    0x9003b,0x9013b,0x900bb,0x901bb,0x9007b,0x9017b,0x900fb,0x901fb,
+    0x90007,0x90107,0x90087,0x90187,0x90047,0x90147,0x900c7,0x901c7,
+    0x90027,0x90127,0x900a7,0x901a7,0x90067,0x90167,0x900e7,0x901e7,
+    0x90017,0x90117,0x90097,0x90197,0x90057,0x90157,0x900d7,0x901d7,
+    0x90037,0x90137,0x900b7,0x901b7,0x90077,0x90177,0x900f7,0x901f7,
+    0x9000f,0x9010f,0x9008f,0x9018f,0x9004f,0x9014f,0x900cf,0x901cf,
+    0x9002f,0x9012f,0x900af,0x901af,0x9006f,0x9016f,0x900ef,0x901ef,
+    0x9001f,0x9011f,0x9009f,0x9019f,0x9005f,0x9015f,0x900df,0x901df,
+    0x9003f,0x9013f,0x900bf,0x901bf,0x9007f,0x9017f,0x900ff,0x901ff,
+    0x70000,0x70040,0x70020,0x70060,0x70010,0x70050,0x70030,0x70070,
+    0x70008,0x70048,0x70028,0x70068,0x70018,0x70058,0x70038,0x70078,
+    0x70004,0x70044,0x70024,0x70064,0x70014,0x70054,0x70034,0x70074,
+    0x80003,0x80083,0x80043,0x800c3,0x80023,0x800a3
+};
 static const uint8_t deflate_reverse4[16] = {
     0,8,4,12,2,10,6,14,1,9,5,13,3,11,7,15
 };
@@ -165,6 +224,12 @@ PTPNG_API_INLINE unsigned deflate_reverse(unsigned value, unsigned count)
             deflate_reverse8(value >> 8)) >> (16 - count);
 }
 
+#if defined(_MSC_VER)
+#define PTPNG_DEFLATE_NOINLINE __declspec(noinline)
+#else
+#define PTPNG_DEFLATE_NOINLINE __attribute__((noinline))
+#endif
+
 PTPNG_API_INLINE unsigned deflate_insert_impl(deflate_state *state,
                                               const uint8_t *src, size_t pos,
                                               size_t size, unsigned save_short)
@@ -172,14 +237,15 @@ PTPNG_API_INLINE unsigned deflate_insert_impl(deflate_state *state,
     uint32_t cur_pos = (uint32_t)(pos + 1) & UINT32_C(0x00ffffff);
     uint64_t hprod;
     unsigned hash;
-    uint32_t tag7, old, old_pos, delta;
-    unsigned valid;
+    uint32_t tag7, old, delta, valid_mask, keep;
 #if PTPNG_DEFLATE_WORD_STORE
     if (size - pos >= 8) {
         uint64_t word;
         uint32_t short_value, short_prod, short_tag, old_short;
         unsigned short_hash;
-        /* One in-bounds 8-byte load supplies both hashes and inline tags. */
+        /* One in-bounds 8-byte load supplies both hashes and inline tags.
+         * All validity and tag checks stay branchless to avoid mispredictions
+         * on medium-entropy photo residuals. */
         memcpy(&word, src + pos, sizeof(word));
         short_value = (uint32_t)word & UINT32_C(0x00ffffff);
         short_prod = short_value * UINT32_C(2654435761);
@@ -188,27 +254,27 @@ PTPNG_API_INLINE unsigned deflate_insert_impl(deflate_state *state,
         old_short = state->short_head[short_hash];
         state->short_head[short_hash] = short_tag | cur_pos;
         if (save_short) {
-            uint32_t s_pos = old_short & UINT32_C(0x00ffffff);
-            uint32_t s_dist = (cur_pos - s_pos) & UINT32_C(0x00ffffff);
-            state->short_dist =
-                ((old_short & UINT32_C(0xff000000)) == short_tag &&
-                 s_pos && s_dist && s_dist <= DEFLATE_WINDOW && s_dist <= pos)
-                ? (uint16_t)s_dist : 0;
+            uint32_t s_dist = (cur_pos - old_short) & UINT32_C(0x00ffffff);
+            uint32_t s_ok = (uint32_t)0 -
+                (((old_short & UINT32_C(0xff000000)) == short_tag) &
+                 ((old_short & UINT32_C(0x00ffffff)) != 0) &
+                 ((s_dist - 1u) < DEFLATE_WINDOW));
+            state->short_dist = (uint16_t)(s_dist & s_ok);
         }
         word &= UINT64_C(0x0000ffffffffffff);
         hprod = word * UINT64_C(0x9e3779b97f4a7c15);
         hash = (unsigned)(hprod >> (64 - DEFLATE_HASH_BITS));
         tag7 = (uint32_t)(hprod >> 16) & UINT32_C(0xfe000000);
         old = state->head[hash];
-        old_pos = old & UINT32_C(0x00ffffff);
-        delta = (cur_pos - old_pos) & UINT32_C(0x00ffffff);
-        valid = old_pos && delta && delta <= DEFLATE_WINDOW && delta <= pos;
-        state->previous[pos & (DEFLATE_WINDOW - 1)] = valid ? (uint16_t)delta : 0;
-        state->head[hash] = tag7 | (valid ? UINT32_C(0x01000000) : 0u) | cur_pos;
-        if (!valid) return 0;
-        if (!(old & UINT32_C(0x01000000)) && (old & UINT32_C(0xfe000000)) != tag7)
-            return 0;
-        return delta;
+        delta = (cur_pos - old) & UINT32_C(0x00ffffff);
+        valid_mask = (uint32_t)0 -
+            (((old & UINT32_C(0x00ffffff)) != 0) & ((delta - 1u) < DEFLATE_WINDOW));
+        state->previous[pos & (DEFLATE_WINDOW - 1)] = (uint16_t)(delta & valid_mask);
+        state->head[hash] = tag7 | (valid_mask & UINT32_C(0x01000000)) | cur_pos;
+        keep = valid_mask &
+            ((uint32_t)0 - (((old & UINT32_C(0x01000000)) != 0) |
+                            ((old & UINT32_C(0xfe000000)) == tag7)));
+        return delta & keep;
     }
 #endif
     if (size - pos >= 3) {
@@ -220,12 +286,12 @@ PTPNG_API_INLINE unsigned deflate_insert_impl(deflate_state *state,
         uint32_t old_short = state->short_head[short_hash];
         state->short_head[short_hash] = short_tag | cur_pos;
         if (save_short) {
-            uint32_t s_pos = old_short & UINT32_C(0x00ffffff);
-            uint32_t s_dist = (cur_pos - s_pos) & UINT32_C(0x00ffffff);
-            state->short_dist =
-                ((old_short & UINT32_C(0xff000000)) == short_tag &&
-                 s_pos && s_dist && s_dist <= DEFLATE_WINDOW && s_dist <= pos)
-                ? (uint16_t)s_dist : 0;
+            uint32_t s_dist = (cur_pos - old_short) & UINT32_C(0x00ffffff);
+            uint32_t s_ok = (uint32_t)0 -
+                (((old_short & UINT32_C(0xff000000)) == short_tag) &
+                 ((old_short & UINT32_C(0x00ffffff)) != 0) &
+                 ((s_dist - 1u) < DEFLATE_WINDOW));
+            state->short_dist = (uint16_t)(s_dist & s_ok);
         }
     } else if (save_short) {
         state->short_dist = 0;
@@ -243,15 +309,15 @@ PTPNG_API_INLINE unsigned deflate_insert_impl(deflate_state *state,
     hash = (unsigned)(hprod >> (64 - DEFLATE_HASH_BITS));
     tag7 = (uint32_t)(hprod >> 16) & UINT32_C(0xfe000000);
     old = state->head[hash];
-    old_pos = old & UINT32_C(0x00ffffff);
-    delta = (cur_pos - old_pos) & UINT32_C(0x00ffffff);
-    valid = old_pos && delta && delta <= DEFLATE_WINDOW && delta <= pos;
-    state->previous[pos & (DEFLATE_WINDOW - 1)] = valid ? (uint16_t)delta : 0;
-    state->head[hash] = tag7 | (valid ? UINT32_C(0x01000000) : 0u) | cur_pos;
-    if (!valid) return 0;
-    if (!(old & UINT32_C(0x01000000)) && (old & UINT32_C(0xfe000000)) != tag7)
-        return 0;
-    return delta;
+    delta = (cur_pos - old) & UINT32_C(0x00ffffff);
+    valid_mask = (uint32_t)0 -
+        (((old & UINT32_C(0x00ffffff)) != 0) & ((delta - 1u) < DEFLATE_WINDOW));
+    state->previous[pos & (DEFLATE_WINDOW - 1)] = (uint16_t)(delta & valid_mask);
+    state->head[hash] = tag7 | (valid_mask & UINT32_C(0x01000000)) | cur_pos;
+    keep = valid_mask &
+        ((uint32_t)0 - (((old & UINT32_C(0x01000000)) != 0) |
+                        ((old & UINT32_C(0xfe000000)) == tag7)));
+    return delta & keep;
 }
 
 /* Only timing depends on this: it requests the buckets that inserting
@@ -281,6 +347,7 @@ PTPNG_API_INLINE void deflate_prefetch(const deflate_state *state,
 #define deflate_insert_interior(state, src, pos, size) \
     ((void)deflate_insert_impl(state, src, pos, size, 0))
 
+PTPNG_DEFLATE_NOINLINE
 static unsigned deflate_match(const deflate_state *state, const uint8_t *src,
                               size_t pos, size_t end, unsigned first_dist,
                               unsigned minimum,
@@ -391,6 +458,7 @@ match_done_fast:
 /* Short matches compete with literal codes, rather than being accepted just
  * because they exist. The estimate includes 12 bits for length/distance
  * symbols, a two-bit margin, and the exact distance extra-bit count. */
+PTPNG_DEFLATE_NOINLINE
 static unsigned deflate_short_match(const deflate_state *state, const uint8_t *src,
                                     size_t pos, size_t end, unsigned minimum,
                                     const uint8_t literal_bits[256],
@@ -438,6 +506,7 @@ static unsigned deflate_short_match(const deflate_state *state, const uint8_t *s
     return 0;
 }
 
+PTPNG_DEFLATE_NOINLINE
 static size_t deflate_parse(deflate_state *state, const uint8_t *src,
                             size_t size, size_t start, unsigned *token_count,
                             uint32_t lit_freq[286], uint32_t dist_freq[30],
@@ -656,6 +725,7 @@ static void deflate_add_run(deflate_tree *tree, uint32_t freq[19],
     ++freq[symbol];
 }
 
+PTPNG_DEFLATE_NOINLINE
 static void deflate_make_tree(deflate_tree *tree, const uint32_t lit_freq[286],
                               const uint32_t dist_freq[30], uint64_t extra_bits)
 {
@@ -860,42 +930,24 @@ static int deflate_stored_block(deflate_writer *w, const uint8_t *src,
 static int deflate_compress(deflate_writer *w, deflate_state *state,
                             const uint8_t *src, size_t size)
 {
-    static uint32_t fixed_lit[286], fixed_dist[30];
-    static uint8_t len_symbol[259];
-    static int tables_ready = 0;
     uint32_t lit_freq[286], dist_freq[30];
     deflate_tree tree;
     size_t pos = 0;
     unsigned i;
-    if (!tables_ready) {
-        for (i = 0; i < 286; ++i) {
-            unsigned bits = i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8;
-            unsigned code = i < 144 ? i + 48 : i < 256 ? i + 256 :
-                            i < 280 ? i - 256 : i - 88;
-            fixed_lit[i] = deflate_reverse(code, bits) | (bits << 16);
-        }
-        for (i = 0; i < 30; ++i)
-            fixed_dist[i] = deflate_reverse(i, 5) | (5u << 16);
-        for (i = 0; i < 29; ++i) {
-            unsigned n, end = i == 28 ? 259 : deflate_len_base[i + 1];
-            for (n = deflate_len_base[i]; n < end; ++n) len_symbol[n] = (uint8_t)i;
-        }
-        tables_ready = 1;
-    }
     if (!size)
-        return deflate_put(w, 3, 3) && deflate_code(w, fixed_lit[256]) &&
+        return deflate_put(w, 3, 3) && deflate_code(w, deflate_fixed_lit[256]) &&
                deflate_align(w);
     while (pos < size) {
         size_t start = pos, block_size, stored_blocks;
         unsigned count, final;
         uint64_t extra_bits, fixed_bits, stored_bits;
         pos = deflate_parse(state, src, size, pos, &count, lit_freq, dist_freq,
-                            &extra_bits, len_symbol);
+                            &extra_bits, deflate_len_symbol);
         final = pos == size;
         block_size = pos - start;
         fixed_bits = 3 + extra_bits;
         for (i = 0; i < 286; ++i)
-            fixed_bits += (uint64_t)lit_freq[i] * (fixed_lit[i] >> 16);
+            fixed_bits += (uint64_t)lit_freq[i] * (deflate_fixed_lit[i] >> 16);
         for (i = 0; i < 30; ++i) fixed_bits += (uint64_t)dist_freq[i] * 5;
         stored_blocks = (block_size + 65534) / 65535;
         stored_bits = (uint64_t)block_size * 8 + (stored_blocks - 1) * 40 +
@@ -905,12 +957,12 @@ static int deflate_compress(deflate_writer *w, deflate_state *state,
             if (!deflate_stored_block(w, src + start, block_size, final)) return 0;
         } else if (fixed_bits <= tree.bits) {
             if (!deflate_put(w, 2 | final, 3) ||
-                !deflate_emit_tokens(w, state->tokens, count, fixed_lit,
-                                      fixed_dist, len_symbol)) return 0;
+                !deflate_emit_tokens(w, state->tokens, count, deflate_fixed_lit,
+                                      deflate_fixed_dist, deflate_len_symbol)) return 0;
         } else {
             if (!deflate_header(w, &tree, final) ||
                 !deflate_emit_tokens(w, state->tokens, count, tree.lit_codes,
-                                      tree.dist_codes, len_symbol)) return 0;
+                                      tree.dist_codes, deflate_len_symbol)) return 0;
         }
     }
     return deflate_align(w);

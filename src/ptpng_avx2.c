@@ -219,27 +219,39 @@ void ptpng_filter_paeth_avx2(uint8_t *dst, const uint8_t *src,
             _mm_storel_epi64((__m128i *)(dst + i), _mm_packus_epi16(a, a));
         }
     } else if (bpp == 6) {
-        for (; i + 8 <= count; i += 6) {
-            __m128i b = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(prev + i)));
-            __m128i s = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(src + i)));
-            __m128i cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
-            PAETH_PIXEL();
-            c = b;
+        uintptr_t du = (uintptr_t)dst, su = (uintptr_t)src;
+        if ((su >= du && su - du >= 2) || (du >= su && du - su >= count)) {
+            for (; i + 8 <= count; i += 6) {
+                __m128i b = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(prev + i)));
+                __m128i s = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(src + i)));
+                __m128i cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
+                PAETH_PIXEL();
+                c = b;
+                _mm_storel_epi64((__m128i *)(dst + i), _mm_packus_epi16(a, a));
+            }
+        } else {
+            for (; i + 8 <= count; i += 6) {
+                __m128i b = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(prev + i)));
+                __m128i s = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(src + i)));
+                __m128i cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
+                PAETH_PIXEL();
+                c = b;
 #if PTPNG_X64
-            {
-                uint64_t out64 = (uint64_t)_mm_cvtsi128_si64(_mm_packus_epi16(a, a));
-                uint32_t lo32 = (uint32_t)out64;
-                uint16_t hi16 = (uint16_t)(out64 >> 32);
-                memcpy(dst + i, &lo32, 4);
-                memcpy(dst + i + 4, &hi16, 2);
-            }
+                {
+                    uint64_t out64 = (uint64_t)_mm_cvtsi128_si64(_mm_packus_epi16(a, a));
+                    uint32_t lo32 = (uint32_t)out64;
+                    uint16_t hi16 = (uint16_t)(out64 >> 32);
+                    memcpy(dst + i, &lo32, 4);
+                    memcpy(dst + i + 4, &hi16, 2);
+                }
 #else
-            {
-                uint8_t out[8];
-                _mm_storel_epi64((__m128i *)out, _mm_packus_epi16(a, a));
-                memcpy(dst + i, out, 6);
-            }
+                {
+                    uint8_t out[8];
+                    _mm_storel_epi64((__m128i *)out, _mm_packus_epi16(a, a));
+                    memcpy(dst + i, out, 6);
+                }
 #endif
+            }
         }
     } else if (bpp == 4) {
         for (; i + 4 <= count; i += 4) {
@@ -256,37 +268,73 @@ void ptpng_filter_paeth_avx2(uint8_t *dst, const uint8_t *src,
             memcpy(dst + i, &out, 4);
         }
     } else if (bpp == 3) {
-        for (; i + 4 <= count; i += 3) {
-            uint32_t sv, bv, out;
-            uint16_t lo16;
-            __m128i b, s, cb;
-            memcpy(&sv, src + i, 4);
-            memcpy(&bv, prev + i, 4);
-            b = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)bv));
-            s = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)sv));
-            cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
-            PAETH_PIXEL();
-            c = b;
-            out = (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(a, a));
-            lo16 = (uint16_t)out;
-            memcpy(dst + i, &lo16, 2);
-            dst[i + 2] = (uint8_t)(out >> 16);
+        uintptr_t du = (uintptr_t)dst, su = (uintptr_t)src;
+        if ((su >= du && su - du >= 1) || (du >= su && du - su >= count)) {
+            /* Safe 4-byte store: stays inside dst[0..count-1] and strictly
+             * behind unread src[i+3], eliminating cross-domain GPR splits. */
+            for (; i + 4 <= count; i += 3) {
+                uint32_t sv, bv, out;
+                __m128i b, s, cb;
+                memcpy(&sv, src + i, 4);
+                memcpy(&bv, prev + i, 4);
+                b = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)bv));
+                s = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)sv));
+                cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
+                PAETH_PIXEL();
+                c = b;
+                out = (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(a, a));
+                memcpy(dst + i, &out, 4);
+            }
+        } else {
+            for (; i + 4 <= count; i += 3) {
+                uint32_t sv, bv, out;
+                uint16_t lo16;
+                __m128i b, s, cb;
+                memcpy(&sv, src + i, 4);
+                memcpy(&bv, prev + i, 4);
+                b = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)bv));
+                s = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)sv));
+                cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
+                PAETH_PIXEL();
+                c = b;
+                out = (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(a, a));
+                lo16 = (uint16_t)out;
+                memcpy(dst + i, &lo16, 2);
+                dst[i + 2] = (uint8_t)(out >> 16);
+            }
         }
     } else if (bpp == 2) {
-        for (; i + 4 <= count; i += 2) {
-            uint32_t sv, bv, out;
-            uint16_t lo16;
-            __m128i b, s, cb;
-            memcpy(&sv, src + i, 4);
-            memcpy(&bv, prev + i, 4);
-            b = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)bv));
-            s = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)sv));
-            cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
-            PAETH_PIXEL();
-            c = b;
-            out = (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(a, a));
-            lo16 = (uint16_t)out;
-            memcpy(dst + i, &lo16, 2);
+        uintptr_t du = (uintptr_t)dst, su = (uintptr_t)src;
+        if ((su >= du && su - du >= 2) || (du >= su && du - su >= count)) {
+            for (; i + 4 <= count; i += 2) {
+                uint32_t sv, bv, out;
+                __m128i b, s, cb;
+                memcpy(&sv, src + i, 4);
+                memcpy(&bv, prev + i, 4);
+                b = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)bv));
+                s = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)sv));
+                cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
+                PAETH_PIXEL();
+                c = b;
+                out = (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(a, a));
+                memcpy(dst + i, &out, 4);
+            }
+        } else {
+            for (; i + 4 <= count; i += 2) {
+                uint32_t sv, bv, out;
+                uint16_t lo16;
+                __m128i b, s, cb;
+                memcpy(&sv, src + i, 4);
+                memcpy(&bv, prev + i, 4);
+                b = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)bv));
+                s = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)sv));
+                cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
+                PAETH_PIXEL();
+                c = b;
+                out = (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(a, a));
+                lo16 = (uint16_t)out;
+                memcpy(dst + i, &lo16, 2);
+            }
         }
     } else {
         ptpng_filter_paeth_scalar(dst, src, prev, count, bpp);
@@ -550,22 +598,32 @@ static void rgba8_p8_avx2(const uint8_t *src, uint8_t *dst, uint32_t n,
     }
 }
 
-#if defined(_MSC_VER) && !defined(__clang__)
-/* MSVC Palette8 -> RGB8: gather eight packed colors, remove alpha and store
- * exactly twenty-four bytes. No source or output padding is required. */
+/* Palette8 -> RGB8: pack pairs of looked-up colors into 64-bit lanes to halve
+ * GPR->XMM crossings, strip alpha with vpshufb, and store exact 24 bytes. */
 static void rgb8_p8_avx2(const uint8_t *src, uint8_t *dst, uint32_t n,
                          const struct ptpng_cvt *c)
 {
     const __m128i ctrl = _mm_setr_epi8(0, 1, 2, 4, 5, 6, 8, 9,
                                        10, 12, 13, 14, -1, -1, -1, -1);
+    const __m256i ctrl256 = _mm256_broadcastsi128_si256(ctrl);
+    const uint32_t *tab = c->pal_words;
     for (; n >= 8; n -= 8, src += 8, dst += 24) {
-        /* Issue independent table lookups before packing the RGB bytes. */
-        const uint32_t *tab = c->pal_words;
-        __m128i colors_lo = _mm_set_epi32(tab[src[3]], tab[src[2]], tab[src[1]], tab[src[0]]);
-        __m128i colors_hi = _mm_set_epi32(tab[src[7]], tab[src[6]], tab[src[5]], tab[src[4]]);
+#if PTPNG_X64
+        uint64_t q0 = (uint64_t)tab[src[0]] | ((uint64_t)tab[src[1]] << 32);
+        uint64_t q1 = (uint64_t)tab[src[2]] | ((uint64_t)tab[src[3]] << 32);
+        uint64_t q2 = (uint64_t)tab[src[4]] | ((uint64_t)tab[src[5]] << 32);
+        uint64_t q3 = (uint64_t)tab[src[6]] | ((uint64_t)tab[src[7]] << 32);
+        __m128i colors_lo = _mm_set_epi64x((long long)q1, (long long)q0);
+        __m128i colors_hi = _mm_set_epi64x((long long)q3, (long long)q2);
+#else
+        __m128i colors_lo = _mm_set_epi32((int)tab[src[3]], (int)tab[src[2]],
+                                          (int)tab[src[1]], (int)tab[src[0]]);
+        __m128i colors_hi = _mm_set_epi32((int)tab[src[7]], (int)tab[src[6]],
+                                          (int)tab[src[5]], (int)tab[src[4]]);
+#endif
         __m256i v = _mm256_inserti128_si256(_mm256_castsi128_si256(colors_lo), colors_hi, 1);
         __m128i lo, hi;
-        v = _mm256_shuffle_epi8(v, _mm256_broadcastsi128_si256(ctrl));
+        v = _mm256_shuffle_epi8(v, ctrl256);
         lo = _mm256_castsi256_si128(v);
         hi = _mm256_extracti128_si256(v, 1);
         _mm_storeu_si128((__m128i *)dst,
@@ -575,7 +633,6 @@ static void rgb8_p8_avx2(const uint8_t *src, uint8_t *dst, uint32_t n,
     for (; n; --n, ++src, dst += 3)
         memcpy(dst, c->pal_rgba + (size_t)*src * 4, 3);
 }
-#endif
 
 static uint32_t adler32_avx2(const uint8_t *p, size_t n)
 {
@@ -659,8 +716,6 @@ void ptpng_avx2_init(void)
         ptpng_cvt_table_rgba8_avx2[(6 << 4) | 4] = rgba8_rgba16_avx2;
         ptpng_cvt_table_rgba8_avx2[(3 << 4) | 3] = rgba8_p8_avx2;
         ptpng_cvt_table_rgb8_avx2[(6 << 4) | 3] = rgb8_rgba8_avx2;
-#if defined(_MSC_VER) && !defined(__clang__)
         ptpng_cvt_table_rgb8_avx2[(3 << 4) | 3] = rgb8_p8_avx2;
-#endif
     }
 }

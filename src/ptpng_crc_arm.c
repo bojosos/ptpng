@@ -85,11 +85,11 @@ static uint32_t ptpng_adler32_arm_dotprod(const uint8_t *p, size_t n)
     uint32_t a = 1, b = 0;
 
     while (n >= 64) {
-        unsigned chunk = (unsigned)(n < 4096 ? n : 4096) & ~63u;
-        uint32x4_t s0 = vdupq_n_u32(0), s1 = s0;
-        uint32x4_t p0 = s0, p1 = s0;
-        uint32x4_t wt0 = s0, wt1 = s0;
-        uint32x4_t sums, weighted;
+        unsigned chunk = (unsigned)(n < 5504 ? n : 5504) & ~63u;
+        uint32x4_t s0 = vdupq_n_u32(0), s1 = s0, s2 = s0, s3 = s0;
+        uint32x4_t p0 = s0, p1 = s0, p2 = s0, p3 = s0;
+        uint32x4_t wt0 = s0, wt1 = s0, wt2 = s0, wt3 = s0;
+        uint32x4_t sums, prior, weighted;
         unsigned i;
         for (i = 0; i < chunk; i += 64) {
             uint8x16_t d0 = vld1q_u8(p + i);
@@ -98,19 +98,22 @@ static uint32_t ptpng_adler32_arm_dotprod(const uint8_t *p, size_t n)
             uint8x16_t d3 = vld1q_u8(p + i + 48);
             p0 = vaddq_u32(p0, s0);
             p1 = vaddq_u32(p1, s1);
+            p2 = vaddq_u32(p2, s2);
+            p3 = vaddq_u32(p3, s3);
             s0 = vdotq_u32(s0, d0, ones);
             s1 = vdotq_u32(s1, d1, ones);
+            s2 = vdotq_u32(s2, d2, ones);
+            s3 = vdotq_u32(s3, d3, ones);
             wt0 = vdotq_u32(wt0, d0, w0);
             wt1 = vdotq_u32(wt1, d1, w1);
-            s0 = vdotq_u32(s0, d2, ones);
-            s1 = vdotq_u32(s1, d3, ones);
-            wt0 = vdotq_u32(wt0, d2, w2);
-            wt1 = vdotq_u32(wt1, d3, w3);
+            wt2 = vdotq_u32(wt2, d2, w2);
+            wt3 = vdotq_u32(wt3, d3, w3);
         }
-        sums = vaddq_u32(s0, s1);
-        weighted = vaddq_u32(vaddq_u32(wt0, wt1),
-                             vshlq_n_u32(vaddq_u32(p0, p1), 6));
-        /* 4096*65520 + 255*4096*4097/2 + 65520 < 2^32. */
+        sums = vaddq_u32(vaddq_u32(s0, s1), vaddq_u32(s2, s3));
+        prior = vaddq_u32(vaddq_u32(p0, p1), vaddq_u32(p2, p3));
+        weighted = vaddq_u32(vaddq_u32(vaddq_u32(wt0, wt1), vaddq_u32(wt2, wt3)),
+                             vshlq_n_u32(prior, 6));
+        /* 5504*65520 + 255*5504*5505/2 + 65520 < 2^32. */
         b = (b + chunk * a + vaddvq_u32(weighted)) % 65521u;
         a = (a + vaddvq_u32(sums)) % 65521u;
         p += chunk;
