@@ -550,6 +550,33 @@ static void rgba8_p8_avx2(const uint8_t *src, uint8_t *dst, uint32_t n,
     }
 }
 
+#if defined(_MSC_VER) && !defined(__clang__)
+/* MSVC Palette8 -> RGB8: gather eight packed colors, remove alpha and store
+ * exactly twenty-four bytes. No source or output padding is required. */
+static void rgb8_p8_avx2(const uint8_t *src, uint8_t *dst, uint32_t n,
+                         const struct ptpng_cvt *c)
+{
+    const __m128i ctrl = _mm_setr_epi8(0, 1, 2, 4, 5, 6, 8, 9,
+                                       10, 12, 13, 14, -1, -1, -1, -1);
+    for (; n >= 8; n -= 8, src += 8, dst += 24) {
+        /* Issue independent table lookups before packing the RGB bytes. */
+        const uint32_t *tab = c->pal_words;
+        __m128i colors_lo = _mm_set_epi32(tab[src[3]], tab[src[2]], tab[src[1]], tab[src[0]]);
+        __m128i colors_hi = _mm_set_epi32(tab[src[7]], tab[src[6]], tab[src[5]], tab[src[4]]);
+        __m256i v = _mm256_inserti128_si256(_mm256_castsi128_si256(colors_lo), colors_hi, 1);
+        __m128i lo, hi;
+        v = _mm256_shuffle_epi8(v, _mm256_broadcastsi128_si256(ctrl));
+        lo = _mm256_castsi256_si128(v);
+        hi = _mm256_extracti128_si256(v, 1);
+        _mm_storeu_si128((__m128i *)dst,
+                        _mm_or_si128(lo, _mm_slli_si128(hi, 12)));
+        _mm_storel_epi64((__m128i *)(dst + 16), _mm_srli_si128(hi, 4));
+    }
+    for (; n; --n, ++src, dst += 3)
+        memcpy(dst, c->pal_rgba + (size_t)*src * 4, 3);
+}
+#endif
+
 static uint32_t adler32_avx2(const uint8_t *p, size_t n)
 {
     const __m256i zero = _mm256_setzero_si256();
@@ -632,5 +659,8 @@ void ptpng_avx2_init(void)
         ptpng_cvt_table_rgba8_avx2[(6 << 4) | 4] = rgba8_rgba16_avx2;
         ptpng_cvt_table_rgba8_avx2[(3 << 4) | 3] = rgba8_p8_avx2;
         ptpng_cvt_table_rgb8_avx2[(6 << 4) | 3] = rgb8_rgba8_avx2;
+#if defined(_MSC_VER) && !defined(__clang__)
+        ptpng_cvt_table_rgb8_avx2[(3 << 4) | 3] = rgb8_p8_avx2;
+#endif
     }
 }

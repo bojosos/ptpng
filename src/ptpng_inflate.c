@@ -41,7 +41,7 @@
 #ifndef INFLATE_FIXED_STREAM
 #define INFLATE_FIXED_STREAM 1
 #endif
-#define DIST_ROOT     9
+#define DIST_ROOT     8
 #define DIST_SIZE     (1u << DIST_ROOT)
 #define DIST_ARENA    4096
 #define CL_ROOT       7
