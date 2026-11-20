@@ -88,7 +88,7 @@ struct ptpng_inflate_chunk { const uint8_t *p; size_t len; };
  * the caller must use the general inflater; partial output is disposable. */
 int ptpng_try_inflate_stored(const struct ptpng_inflate_chunk *chunks,
                               size_t count, uint8_t *out, size_t out_len,
-                              uint32_t flags);
+                              uint32_t flags, struct ptpng_inflate_sink *sink);
 
 /* ---- filters ---------------------------------------------------------
  * Reconstruct one scanline from the filtered bytes, writing the final
@@ -201,7 +201,7 @@ extern ptpng_cvt_fn ptpng_cvt_table_rgb8_avx2[128];
 struct ptpng_cpu {
     unsigned sse2 : 1, ssse3 : 1, sse41 : 1, pclmul : 1;
     unsigned avx2 : 1, bmi1 : 1, bmi2 : 1;
-    unsigned neon : 1, arm_crc32 : 1;
+    unsigned neon : 1, arm_crc32 : 1, arm_dotprod : 1;
     ptpng_filter_fn filter_sub, filter_up, filter_paeth;
     const ptpng_cvt_fn *cvt_table_rgba8;
     const ptpng_cvt_fn *cvt_table_rgb8;

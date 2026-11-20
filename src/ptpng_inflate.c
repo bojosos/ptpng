@@ -41,7 +41,7 @@
 #ifndef INFLATE_FIXED_STREAM
 #define INFLATE_FIXED_STREAM 1
 #endif
-#define DIST_ROOT     8
+#define DIST_ROOT     9
 #define DIST_SIZE     (1u << DIST_ROOT)
 #define DIST_ARENA    4096
 #define CL_ROOT       7
@@ -411,7 +411,7 @@ static int inflate_impl(const struct ptpng_inflate_chunk *chunks,
 #define DROP_E(e)                                                       \
     do { bitbuf >>= (uint8_t)(e); bitcnt -= (int)((e) & 0xFF); } while (0)
 #define EXTRA_BITS(saved, e)                                            \
-    (((uint32_t)(saved) & ((1u << ((e) & 0xFF)) - 1)) >> (((e) >> 8) & 0xF))
+    (((uint32_t)(saved) & ((1u << ((e) & 0xFF)) - 1)) >> (uint8_t)((e) >> 8))
 #define COPY16(d, s) memcpy((d), (s), 16)
 
     for (;;) { /* per deflate block */
@@ -655,19 +655,31 @@ static int inflate_impl(const struct ptpng_inflate_chunk *chunks,
                             } while (dst < end);
                         } else if (dist == 1) {
 #if defined(__aarch64__) || defined(_M_ARM64)
-                            /* Inline vector stores: on AArch64 a library
-                             * fill costs more for runs this short, and
-                             * zero fills may take a cache-line zeroing path. */
-                            uint8_t pattern[16];
-                            memset(pattern, src[0], sizeof(pattern));
+                            uint8x16_t v = vdupq_n_u8(src[0]);
                             do {
-                                memcpy(dst, pattern, 16);
-                                memcpy(dst + 16, pattern, 16);
+                                vst1q_u8(dst, v);
+                                vst1q_u8(dst + 16, v);
+                                dst += 32;
+                            } while (dst < end);
+#elif defined(PTPNG_INFLATE_BMI2) && defined(__AVX2__)
+                            __m256i v = _mm256_set1_epi8((char)src[0]);
+                            _mm256_storeu_si256((__m256i *)dst, v);
+                            if (len > 32) {
+                                do {
+                                    _mm256_storeu_si256((__m256i *)(dst + 32), v);
+                                    _mm256_storeu_si256((__m256i *)(dst + 64), v);
+                                    dst += 64;
+                                } while (dst + 32 < end);
+                            }
+#elif PTPNG_X64
+                            __m128i v = _mm_set1_epi8((char)src[0]);
+                            do {
+                                _mm_storeu_si128((__m128i *)dst, v);
+                                _mm_storeu_si128((__m128i *)(dst + 16), v);
                                 dst += 32;
                             } while (dst < end);
 #else
                             if (len > 32) {
-                                /* long runs: the C library's fill is widest */
                                 memset(dst, src[0], len);
                             } else {
                                 uint64_t v = (uint64_t)src[0] *
@@ -690,6 +702,8 @@ static int inflate_impl(const struct ptpng_inflate_chunk *chunks,
                     op += len;
                 } while (op < op_limit && in < in_limit);
                 pos = (size_t)(op - out);
+                if (pos >= next_sink)
+                    continue;
             }
 
             /* Careful path: one symbol at a time with full checks, used near
@@ -916,9 +930,10 @@ PTPNG_API_INLINE int stored_byte(const struct ptpng_inflate_chunk *chunks,
 
 int ptpng_try_inflate_stored(const struct ptpng_inflate_chunk *chunks,
                               size_t count, uint8_t *out, size_t out_len,
-                              uint32_t flags)
+                              uint32_t flags, struct ptpng_inflate_sink *sink)
 {
     size_t index = 0, offset = 0, pos = 0;
+    size_t next_sink = sink ? (size_t)SINK_STEP : SIZE_MAX;
     uint8_t cmf, flg, header, lengths[4], byte;
     uint32_t want = 0;
     unsigned i;
@@ -951,6 +966,10 @@ int ptpng_try_inflate_stored(const struct ptpng_inflate_chunk *chunks,
             offset += take;
             length -= (unsigned)take;
         }
+        if (pos >= next_sink) {
+            sink->progress(sink, pos, 0);
+            next_sink = pos + SINK_STEP;
+        }
         if (header & 1) break;
     }
     if (pos != out_len) return 0;
@@ -963,7 +982,13 @@ int ptpng_try_inflate_stored(const struct ptpng_inflate_chunk *chunks,
         offset = 0;
     }
     if (index != count) return 0; /* no bytes may follow the Adler checksum */
-    if (!(flags & PTPNG_INF_NO_ADLER) && ptpng_adler32(out, out_len) != want) return 0;
+    if (sink) {
+        sink->progress(sink, pos, 1);
+        if (!(flags & PTPNG_INF_NO_ADLER) && sink->adler != want) return 0;
+    } else if (!(flags & PTPNG_INF_NO_ADLER) &&
+               ptpng_adler32(out, out_len) != want) {
+        return 0;
+    }
     return 1;
 }
 #endif /* !PTPNG_INFLATE_BMI2 */

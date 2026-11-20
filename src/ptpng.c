@@ -190,6 +190,8 @@ const char *ptpng_features(void)
     strcat(feats, "neon ");
     if (ptpng_cpu.arm_crc32)
         strcat(feats, "crc32 ");
+    if (ptpng_cpu.arm_dotprod)
+        strcat(feats, "dotprod ");
 #endif
     if (!feats[0])
         strcat(feats, "scalar ");
@@ -524,7 +526,54 @@ static void rgb8_p##d(const uint8_t *src, uint8_t *dst, uint32_t n,       \
 PAL_TO_RGB8(1)
 PAL_TO_RGB8(2)
 PAL_TO_RGB8(4)
-PAL_TO_RGB8(8)
+
+/* Palette8 -> RGB8: on 64-bit little-endian targets pack eight RGB pixels
+ * into three exact 64-bit stores, avoiding overlapping stores and SIMD
+ * lane-insertion stalls. */
+static void rgb8_p8(const uint8_t *src, uint8_t *dst, uint32_t n,
+                    const struct ptpng_cvt *c)
+{
+    const uint8_t *pal = c->pal_rgba;
+    uint32_t i = 0;
+#if PTPNG_X64 || defined(_M_ARM64) || \
+    (defined(__aarch64__) && defined(__BYTE_ORDER__) && \
+     defined(__ORDER_LITTLE_ENDIAN__) && \
+     __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+    for (; i + 8 <= n; i += 8, dst += 24) {
+        uint32_t u0, u1, u2, u3, u4, u5, u6, u7;
+        uint64_t p0, p1, p2, p3, p4, p5, p6, p7;
+        uint64_t w0, w1, w2;
+        memcpy(&u0, pal + (size_t)src[i] * 4, 4);
+        memcpy(&u1, pal + (size_t)src[i + 1] * 4, 4);
+        memcpy(&u2, pal + (size_t)src[i + 2] * 4, 4);
+        memcpy(&u3, pal + (size_t)src[i + 3] * 4, 4);
+        memcpy(&u4, pal + (size_t)src[i + 4] * 4, 4);
+        memcpy(&u5, pal + (size_t)src[i + 5] * 4, 4);
+        memcpy(&u6, pal + (size_t)src[i + 6] * 4, 4);
+        memcpy(&u7, pal + (size_t)src[i + 7] * 4, 4);
+        p0 = u0 & UINT32_C(0xFFFFFF);
+        p1 = u1 & UINT32_C(0xFFFFFF);
+        p2 = u2 & UINT32_C(0xFFFFFF);
+        p3 = u3 & UINT32_C(0xFFFFFF);
+        p4 = u4 & UINT32_C(0xFFFFFF);
+        p5 = u5 & UINT32_C(0xFFFFFF);
+        p6 = u6 & UINT32_C(0xFFFFFF);
+        p7 = u7;
+        w0 = p0 | (p1 << 24) | (p2 << 48);
+        w1 = (p2 >> 16) | (p3 << 8) | (p4 << 32) | (p5 << 56);
+        w2 = (p5 >> 8) | (p6 << 16) | (p7 << 40);
+        memcpy(dst, &w0, 8);
+        memcpy(dst + 8, &w1, 8);
+        memcpy(dst + 16, &w2, 8);
+    }
+#endif
+    for (; i + 1 < n; i++) {
+        memcpy(dst, pal + (size_t)src[i] * 4, 4);
+        dst += 3;
+    }
+    if (i < n)
+        memcpy(dst, pal + (size_t)src[i] * 4, 3);
+}
 
 static void rgb8_ga8(const uint8_t *src, uint8_t *dst, uint32_t n,
                      const struct ptpng_cvt *c)
@@ -1477,15 +1526,6 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
         goto fail_cleanup;
     }
     if (prof) P2 = pt_tsc();
-    /* Stored streams can copy straight from fragmented IDAT payloads.
-     * Everything else retains the general inflater and its error handling. */
-    if (n_idat_refs > 1 &&
-        ptpng_try_inflate_stored(idat_refs, n_idat_refs, raw, (size_t)raw_size,
-            (opts->flags & PTPNG_FLAG_NO_VERIFY_ADLER) ? PTPNG_INF_NO_ADLER : 0)) {
-        free(idat_refs);
-        idat_refs = NULL;
-        goto inflated;
-    }
     {
         uint32_t ifl = (opts->flags & PTPNG_FLAG_NO_VERIFY_ADLER)
                            ? PTPNG_INF_NO_ADLER : 0;
@@ -1502,27 +1542,56 @@ int ptpng_decode(const void *data, size_t size, const ptpng_opts *opts,
         if (!interlace && !getenv("PTPNG_DUMP_RAW") &&
             !ptpng_inflate_prefers_fixed(head, idat_total, (size_t)raw_size)) {
             struct row_sink sink;
+            int stored_ok = 0;
             if (prof) P2 = pt_tsc();
-            memset(&sink, 0, sizeof(sink));
-            sink.base.progress = row_sink_progress;
-            sink.base.adler = 1;
-            sink.raw = raw;
-            sink.zeros = zeros;
-            sink.rb = (size_t)rb;
-            sink.h = h;
-            sink.bpp = (channels_of(ct) * depth + 7) >> 3;
-            sink.check_adler = !(ifl & PTPNG_INF_NO_ADLER);
-            rc = ptpng_inflate_sink(idat_refs, n_idat_refs, raw,
-                                    (size_t)raw_size, ifl, &sink.base);
+            /* Stored streams copy straight from IDAT payloads into cache-hot
+             * slices for fused Adler-32 and unfiltering. */
+            if (got == 3 && (head[2] & 6) == 0) {
+                memset(&sink, 0, sizeof(sink));
+                sink.base.progress = row_sink_progress;
+                sink.base.adler = 1;
+                sink.raw = raw;
+                sink.zeros = zeros;
+                sink.rb = (size_t)rb;
+                sink.h = h;
+                sink.bpp = (channels_of(ct) * depth + 7) >> 3;
+                sink.check_adler = !(ifl & PTPNG_INF_NO_ADLER);
+                stored_ok = ptpng_try_inflate_stored(idat_refs, n_idat_refs,
+                                                     raw, (size_t)raw_size,
+                                                     ifl, &sink.base);
+            }
+            if (stored_ok) {
+                free(idat_refs);
+                idat_refs = NULL;
+                rc = sink.err;
+            } else {
+                memset(&sink, 0, sizeof(sink));
+                sink.base.progress = row_sink_progress;
+                sink.base.adler = 1;
+                sink.raw = raw;
+                sink.zeros = zeros;
+                sink.rb = (size_t)rb;
+                sink.h = h;
+                sink.bpp = (channels_of(ct) * depth + 7) >> 3;
+                sink.check_adler = !(ifl & PTPNG_INF_NO_ADLER);
+                rc = ptpng_inflate_sink(idat_refs, n_idat_refs, raw,
+                                        (size_t)raw_size, ifl, &sink.base);
+                free(idat_refs);
+                idat_refs = NULL;
+                if (rc) {
+                    free(raw); free(zeros);
+                    ptpng_info_free(&linfo);
+                    return rc;
+                }
+                rc = sink.err;
+            }
+            if (prof) P3 = pt_tsc();
+        } else if (n_idat_refs > 1 && got == 3 && (head[2] & 6) == 0 &&
+                   ptpng_try_inflate_stored(idat_refs, n_idat_refs, raw,
+                                            (size_t)raw_size, ifl, NULL)) {
             free(idat_refs);
             idat_refs = NULL;
-            if (rc) {
-                free(raw); free(zeros);
-                ptpng_info_free(&linfo);
-                return rc;
-            }
-            rc = sink.err;
-            if (prof) P3 = pt_tsc();
+            goto inflated;
         } else {
             const uint8_t *zin;
             if (n_idat_refs == 1) {

@@ -170,17 +170,40 @@ void ptpng_filter_up_avx2(uint8_t *dst, const uint8_t *src,
 
 /* The bytes of a pixel are independent Paeth chains. Keep the decoded pixel
  * in 16-bit lanes and select all predictors together. Only the left pixel
- * a arrives late, so 3c - b is formed beforehand and the threshold
- * 3c - a - b needs one subtraction after a. Values span -510..765, safely
- * inside signed 16-bit lanes; threshold equality selects a or b, never c.
- * A byte add of the zero-extended lanes yields (s + predictor) mod 256
- * with clear high bytes, so no mask is needed. */
-#define PAETH_PIXEL()                                                        do {                                                                         __m128i lo = _mm_min_epi16(a, b), hi = _mm_max_epi16(a, b);              __m128i t = _mm_sub_epi16(cb, a), p;                                     p = _mm_blendv_epi8(hi, c, _mm_cmpgt_epi16(t, lo));                      p = _mm_blendv_epi8(lo, p, _mm_cmpgt_epi16(hi, t));                      a = _mm_add_epi8(s, p);                                              } while (0)
+ * a arrives late, so 3c - b and s + c are formed beforehand; s + lo and
+ * s + hi then run in parallel with the two threshold comparisons, removing
+ * the trailing add from the loop-carried dependency chain (4 ops total).
+ * Values span -510..765, safely inside signed 16-bit lanes; threshold
+ * equality selects a or b, never c. A byte add of zero-extended lanes
+ * yields (s + predictor) mod 256 with clear high bytes. */
+#if defined(__GNUC__) || defined(__clang__)
+#define PAETH_BARRIER_X86(v) __asm__("" : "+x"(v))
+#else
+#define PAETH_BARRIER_X86(v) ((void)0)
+#endif
 
-/* Three- and six-byte pixels load a whole four- or eight-byte group that
- * stays inside the row; the extra lanes compute independent garbage. Stores
- * write exactly one pixel, so overlapping or in-place rows stay correct.
- * The final pixels, whose group would leave the row, use the scalar tail. */
+#define PAETH_PIXEL()                                                        \
+    do {                                                                     \
+        __m128i s_c = _mm_add_epi8(s, c);                                    \
+        __m128i lo, hi, t, m1, m2, s_lo, s_hi, p;                            \
+        PAETH_BARRIER_X86(cb);                                               \
+        PAETH_BARRIER_X86(s_c);                                              \
+        lo = _mm_min_epi16(a, b);                                            \
+        hi = _mm_max_epi16(a, b);                                            \
+        t = _mm_sub_epi16(cb, a);                                            \
+        m1 = _mm_cmpgt_epi16(t, lo);                                         \
+        m2 = _mm_cmpgt_epi16(hi, t);                                         \
+        s_lo = _mm_add_epi8(s, lo);                                          \
+        s_hi = _mm_add_epi8(s, hi);                                          \
+        p = _mm_blendv_epi8(s_hi, s_c, m1);                                  \
+        a = _mm_blendv_epi8(s_lo, p, m2);                                    \
+    } while (0)
+
+/* Two-, three- and six-byte pixels load a whole four- or eight-byte group
+ * that stays inside the row; the extra lanes compute independent garbage.
+ * Stores write exactly one pixel, so overlapping or in-place rows stay
+ * correct. The final pixels, whose group would leave the row, use the
+ * scalar tail. */
 void ptpng_filter_paeth_avx2(uint8_t *dst, const uint8_t *src,
                              const uint8_t *prev, size_t count, unsigned bpp)
 {
@@ -200,14 +223,26 @@ void ptpng_filter_paeth_avx2(uint8_t *dst, const uint8_t *src,
             __m128i b = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(prev + i)));
             __m128i s = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(src + i)));
             __m128i cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
-            uint8_t out[8];
             PAETH_PIXEL();
             c = b;
-            _mm_storel_epi64((__m128i *)out, _mm_packus_epi16(a, a));
-            memcpy(dst + i, out, 6);
+#if PTPNG_X64
+            {
+                uint64_t out64 = (uint64_t)_mm_cvtsi128_si64(_mm_packus_epi16(a, a));
+                uint32_t lo32 = (uint32_t)out64;
+                uint16_t hi16 = (uint16_t)(out64 >> 32);
+                memcpy(dst + i, &lo32, 4);
+                memcpy(dst + i + 4, &hi16, 2);
+            }
+#else
+            {
+                uint8_t out[8];
+                _mm_storel_epi64((__m128i *)out, _mm_packus_epi16(a, a));
+                memcpy(dst + i, out, 6);
+            }
+#endif
         }
-    } else if (bpp == 4 || bpp == 3) {
-        for (; i + 4 <= count; i += bpp) {
+    } else if (bpp == 4) {
+        for (; i + 4 <= count; i += 4) {
             uint32_t sv, bv, out;
             __m128i b, s, cb;
             memcpy(&sv, src + i, 4);
@@ -218,8 +253,40 @@ void ptpng_filter_paeth_avx2(uint8_t *dst, const uint8_t *src,
             PAETH_PIXEL();
             c = b;
             out = (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(a, a));
-            if (bpp == 4) memcpy(dst + i, &out, 4);
-            else memcpy(dst + i, &out, 3);
+            memcpy(dst + i, &out, 4);
+        }
+    } else if (bpp == 3) {
+        for (; i + 4 <= count; i += 3) {
+            uint32_t sv, bv, out;
+            uint16_t lo16;
+            __m128i b, s, cb;
+            memcpy(&sv, src + i, 4);
+            memcpy(&bv, prev + i, 4);
+            b = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)bv));
+            s = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)sv));
+            cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
+            PAETH_PIXEL();
+            c = b;
+            out = (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(a, a));
+            lo16 = (uint16_t)out;
+            memcpy(dst + i, &lo16, 2);
+            dst[i + 2] = (uint8_t)(out >> 16);
+        }
+    } else if (bpp == 2) {
+        for (; i + 4 <= count; i += 2) {
+            uint32_t sv, bv, out;
+            uint16_t lo16;
+            __m128i b, s, cb;
+            memcpy(&sv, src + i, 4);
+            memcpy(&bv, prev + i, 4);
+            b = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)bv));
+            s = _mm_cvtepu8_epi16(_mm_cvtsi32_si128((int)sv));
+            cb = _mm_sub_epi16(_mm_add_epi16(c, _mm_add_epi16(c, c)), b);
+            PAETH_PIXEL();
+            c = b;
+            out = (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(a, a));
+            lo16 = (uint16_t)out;
+            memcpy(dst + i, &lo16, 2);
         }
     } else {
         ptpng_filter_paeth_scalar(dst, src, prev, count, bpp);
@@ -236,6 +303,7 @@ void ptpng_filter_paeth_avx2(uint8_t *dst, const uint8_t *src,
     }
 }
 #undef PAETH_PIXEL
+#undef PAETH_BARRIER_X86
 
 /* ---- conversion tables (filled from scalar, hot entries overridden) ---- */
 
@@ -482,33 +550,6 @@ static void rgba8_p8_avx2(const uint8_t *src, uint8_t *dst, uint32_t n,
     }
 }
 
-#if defined(_MSC_VER) && !defined(__clang__)
-/* MSVC Palette8 -> RGB8: gather eight packed colors, remove alpha and store
- * exactly twenty-four bytes. No source or output padding is required. */
-static void rgb8_p8_avx2(const uint8_t *src, uint8_t *dst, uint32_t n,
-                         const struct ptpng_cvt *c)
-{
-    const __m128i ctrl = _mm_setr_epi8(0, 1, 2, 4, 5, 6, 8, 9,
-                                       10, 12, 13, 14, -1, -1, -1, -1);
-    for (; n >= 8; n -= 8, src += 8, dst += 24) {
-        /* Issue independent table lookups before packing the RGB bytes. */
-        const uint32_t *tab = c->pal_words;
-        __m128i colors_lo = _mm_set_epi32(tab[src[3]], tab[src[2]], tab[src[1]], tab[src[0]]);
-        __m128i colors_hi = _mm_set_epi32(tab[src[7]], tab[src[6]], tab[src[5]], tab[src[4]]);
-        __m256i v = _mm256_inserti128_si256(_mm256_castsi128_si256(colors_lo), colors_hi, 1);
-        __m128i lo, hi;
-        v = _mm256_shuffle_epi8(v, _mm256_broadcastsi128_si256(ctrl));
-        lo = _mm256_castsi256_si128(v);
-        hi = _mm256_extracti128_si256(v, 1);
-        _mm_storeu_si128((__m128i *)dst,
-                        _mm_or_si128(lo, _mm_slli_si128(hi, 12)));
-        _mm_storel_epi64((__m128i *)(dst + 16), _mm_srli_si128(hi, 4));
-    }
-    for (; n; --n, ++src, dst += 3)
-        memcpy(dst, c->pal_rgba + (size_t)*src * 4, 3);
-}
-#endif
-
 static uint32_t adler32_avx2(const uint8_t *p, size_t n)
 {
     const __m256i zero = _mm256_setzero_si256();
@@ -519,17 +560,31 @@ static uint32_t adler32_avx2(const uint8_t *p, size_t n)
     uint32_t a = 1, b = 0;
 
     while (n >= 32) {
-        unsigned chunk = (unsigned)(n < 4096 ? n : 4096) & ~31u;
+        unsigned chunk = (unsigned)(n < 5504 ? n : 5504) & ~31u;
         __m256i sum = zero, prefix = zero, weighted = zero;
         uint64_t sums[4], prefixes[4];
         uint32_t terms[8], s = 0, w = 0;
-        unsigned i;
-        for (i = 0; i < chunk; i += 32) {
+        unsigned i = 0;
+        /* Process 64 bytes per iteration: each maddubs lane is at most
+         * 255*(32+31) = 16065, so two blocks sum to at most 32130 <= 32767
+         * before a single madd_epi16 widens both to 32-bit. */
+        for (; i + 64 <= chunk; i += 64) {
+            __m256i b0 = _mm256_loadu_si256((const __m256i *)(p + i));
+            __m256i b1 = _mm256_loadu_si256((const __m256i *)(p + i + 32));
+            __m256i sad0 = _mm256_sad_epu8(b0, zero);
+            __m256i sad1 = _mm256_sad_epu8(b1, zero);
+            __m256i m0 = _mm256_maddubs_epi16(b0, weights);
+            __m256i m1 = _mm256_maddubs_epi16(b1, weights);
+            prefix = _mm256_add_epi64(prefix,
+                         _mm256_add_epi64(_mm256_slli_epi64(sum, 1), sad0));
+            sum = _mm256_add_epi64(sum, _mm256_add_epi64(sad0, sad1));
+            weighted = _mm256_add_epi32(weighted,
+                           _mm256_madd_epi16(_mm256_add_epi16(m0, m1), ones));
+        }
+        if (i < chunk) {
             __m256i bytes = _mm256_loadu_si256((const __m256i *)(p + i));
             prefix = _mm256_add_epi64(prefix, sum);
             sum = _mm256_add_epi64(sum, _mm256_sad_epu8(bytes, zero));
-            /* Adjacent weighted bytes sum to at most 255*(32+31),
-             * so the signed saturating multiply-add cannot saturate. */
             weighted = _mm256_add_epi32(weighted, _mm256_madd_epi16(
                 _mm256_maddubs_epi16(bytes, weights), ones));
         }
@@ -541,7 +596,7 @@ static uint32_t adler32_avx2(const uint8_t *p, size_t n)
             w += 32u * (uint32_t)prefixes[i];
         }
         for (i = 0; i < 8; i++) w += terms[i];
-        /* 4096*65520 + 255*4096*4097/2 + 65520 < 2^32. */
+        /* 5504*65520 + 255*5504*5505/2 + 65520 < 2^32. */
         b = (b + chunk * a + w) % 65521u;
         a = (a + s) % 65521u;
         p += chunk;
@@ -577,9 +632,5 @@ void ptpng_avx2_init(void)
         ptpng_cvt_table_rgba8_avx2[(6 << 4) | 4] = rgba8_rgba16_avx2;
         ptpng_cvt_table_rgba8_avx2[(3 << 4) | 3] = rgba8_p8_avx2;
         ptpng_cvt_table_rgb8_avx2[(6 << 4) | 3] = rgb8_rgba8_avx2;
-#if defined(_MSC_VER) && !defined(__clang__)
-        /* GCC's scalar packed-palette lookup is faster than RGB gathering. */
-        ptpng_cvt_table_rgb8_avx2[(3 << 4) | 3] = rgb8_p8_avx2;
-#endif
     }
 }

@@ -50,16 +50,16 @@ if(PTPNG_X86)
         set_source_files_properties(src/ptpng_crc_x86.c PROPERTIES
                                     COMPILE_OPTIONS "-mpclmul;-msse2")
     endif()
-    # BMI2 copy of the general inflater, selected at run time.
+    # BMI2+AVX2 copy of the general inflater, selected at run time.
     if(MSVC AND NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
         set_source_files_properties(src/ptpng_inflate_bmi2.c PROPERTIES
                                     COMPILE_OPTIONS "/arch:AVX2")
     elseif(MSVC)
         set_source_files_properties(src/ptpng_inflate_bmi2.c PROPERTIES
-                                    COMPILE_OPTIONS "/clang:-mbmi2")
+                                    COMPILE_OPTIONS "/clang:-mavx2;/clang:-mbmi2")
     else()
         set_source_files_properties(src/ptpng_inflate_bmi2.c PROPERTIES
-                                    COMPILE_OPTIONS "-mbmi2")
+                                    COMPILE_OPTIONS "-mavx2;-mbmi2")
     endif()
     target_compile_definitions(ptpng PRIVATE PTPNG_HAVE_INFLATE_BMI2=1)
     target_sources(ptpng PRIVATE src/ptpng_avx2.c src/ptpng_encode_avx2.c

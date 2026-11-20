@@ -300,6 +300,7 @@ int main(int argc, char **argv)
         return 0;
     }
     if (test_paeth_pred()) bad = 1;
+    if (test_paeth_dispatch(2)) bad = 1;
     if (test_paeth_dispatch(3)) bad = 1;
     if (test_paeth_dispatch(4)) bad = 1;
     if (test_paeth_dispatch(6)) bad = 1;
